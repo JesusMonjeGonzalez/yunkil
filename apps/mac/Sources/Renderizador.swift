@@ -4,7 +4,7 @@ import MetalKit
 import YunkilCore
 import simd
 
-/// Dibuja la escena raymarcheando el shader que generó el núcleo Kotlin.
+/// Dibuja el documento raymarcheando el shader que generó el núcleo Kotlin.
 ///
 /// El reparto de responsabilidades es deliberado: aquí no hay geometría ni reglas,
 /// solo el oficio de poner píxeles. Todo lo que sabe de sólidos vive en Kotlin.
@@ -14,15 +14,13 @@ final class Renderizador: NSObject, MTKViewDelegate {
     private let cola: MTLCommandQueue
     private var pipeline: MTLRenderPipelineState?
 
-    private let escena: Escena
+    private let editor: Editor
     private var bufferDeUniforms: MTLBuffer?
     private var huellaCompilada: String = ""
 
     var camara = CamaraOrbital()
     private let gobernador: GobernadorDeRecursos
 
-    /// Se publica para la barra de estado. Es una cadena, no un modelo: el HUD no
-    /// debe poder influir en el render.
     private(set) var estado: String = ""
     var alActualizarEstado: ((String) -> Void)?
 
@@ -30,13 +28,13 @@ final class Renderizador: NSObject, MTKViewDelegate {
     /// y se sigue dibujando: el usuario no debe encontrarse una pantalla negra.
     private(set) var ultimoError: String?
 
-    init?(vista: MTKView, escena: Escena) {
+    init?(vista: MTKView, editor: Editor) {
         guard let dispositivo = MTLCreateSystemDefaultDevice(),
               let cola = dispositivo.makeCommandQueue() else { return nil }
 
         self.dispositivo = dispositivo
         self.cola = cola
-        self.escena = escena
+        self.editor = editor
 
         let hz = Double(vista.preferredFramesPerSecond > 0 ? vista.preferredFramesPerSecond : 60)
         self.gobernador = GobernadorDeRecursos(objetivoDeFotograma: 1.0 / hz)
@@ -50,41 +48,45 @@ final class Renderizador: NSObject, MTKViewDelegate {
         vista.depthStencilPixelFormat = .invalid
         vista.clearColor = MTLClearColor(red: 0.04, green: 0.045, blue: 0.055, alpha: 1)
 
-        encuadrarModelo()
-        recompilarSiHaceFalta(forzar: true)
+        encuadrar()
+        compilar()
         actualizarUniforms()
     }
 
-    // MARK: - Escena
+    // MARK: - Sincronización con el documento
 
-    func encuadrarModelo() {
+    /// Recoge los cambios del editor.
+    ///
+    /// - Parameter recompilar: lo dice el propio editor comparando huellas
+    ///   topológicas. Mover un parámetro llega aquí como `false` y cuesta un
+    ///   `memcpy`; añadir una pieza llega como `true` y cuesta una compilación.
+    func sincronizar(recompilar: Bool) {
+        if recompilar || pipeline == nil { compilar() }
+        actualizarUniforms()
+    }
+
+    func encuadrar() {
+        let mn = editor.cotaMinima.map { $0.floatValue }
+        let mx = editor.cotaMaxima.map { $0.floatValue }
+        guard mn.count == 3, mx.count == 3 else { return }
         camara.encuadrar(
-            minimo: SIMD3<Float>(escena.cotaMinimaX, escena.cotaMinimaY, escena.cotaMinimaZ),
-            maximo: SIMD3<Float>(escena.cotaMaximaX, escena.cotaMaximaY, escena.cotaMaximaZ)
+            minimo: SIMD3<Float>(mn[0], mn[1], mn[2]),
+            maximo: SIMD3<Float>(mx[0], mx[1], mx[2])
         )
     }
 
-    /// Sustituye el modelo. Solo recompila si cambió la topología: mover un
-    /// parámetro debe costar un `memcpy`, no una compilación.
-    func reemplazarModelo(_ nuevo: any SdfNode) {
-        let recompilar = escena.reemplazar(nueva: nuevo)
-        if recompilar { recompilarSiHaceFalta(forzar: false) }
-        actualizarUniforms()
-        encuadrarModelo()
-    }
-
-    private func recompilarSiHaceFalta(forzar: Bool) {
-        guard forzar || escena.huellaTopologica != huellaCompilada else { return }
+    private func compilar() {
+        guard editor.huellaTopologica != huellaCompilada || pipeline == nil else { return }
 
         do {
-            let biblioteca = try dispositivo.makeLibrary(source: escena.fuenteMsl, options: nil)
+            let biblioteca = try dispositivo.makeLibrary(source: editor.fuenteMsl, options: nil)
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = biblioteca.makeFunction(name: "yk_vertex")
             descriptor.fragmentFunction = biblioteca.makeFunction(name: "yk_fragment")
             descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
 
             pipeline = try dispositivo.makeRenderPipelineState(descriptor: descriptor)
-            huellaCompilada = escena.huellaTopologica
+            huellaCompilada = editor.huellaTopologica
             ultimoError = nil
         } catch {
             // Se conserva el pipeline anterior a propósito.
@@ -94,7 +96,7 @@ final class Renderizador: NSObject, MTKViewDelegate {
     }
 
     private func actualizarUniforms() {
-        let valores = escena.uniforms().map { $0.floatValue }
+        let valores = editor.uniforms().map { $0.floatValue }
         let bytes = max(valores.count, 1) * MemoryLayout<Float>.stride
 
         if bufferDeUniforms == nil || bufferDeUniforms!.length < bytes {
@@ -119,11 +121,8 @@ final class Renderizador: NSObject, MTKViewDelegate {
               let codificador = comando.makeRenderCommandEncoder(descriptor: descriptor)
         else { return }
 
-        let ancho = Float(vista.drawableSize.width)
-        let alto = Float(vista.drawableSize.height)
-
         var camaraGPU = camara.empaquetar(
-            resolucion: SIMD2<Float>(ancho, alto),
+            resolucion: SIMD2<Float>(Float(vista.drawableSize.width), Float(vista.drawableSize.height)),
             escalaPasos: gobernador.escalaDePasos,
             // El umbral de impacto sigue a la distancia de la cámara: fijo en
             // milímetros daría bordes sucios de lejos y gastaría pasos de cerca.
