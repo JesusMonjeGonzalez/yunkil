@@ -1,0 +1,5 @@
+build/
+.gradle/
+core/build/
+.DS_Store
+*.xcuserstate
