@@ -9,6 +9,8 @@ import yunkil.kernel.Transform
 import yunkil.kernel.Transformado
 import yunkil.kernel.Vec3
 import yunkil.kernel.empaquetarUniforms
+import yunkil.malla.Certificado
+import yunkil.malla.Exportador
 import yunkil.msl.MslGenerator
 
 /**
@@ -284,6 +286,35 @@ class Editor(inicial: Documento = Documento.vacio()) {
         documento = siguiente
         regenerar()
         return true
+    }
+
+    // ------------------------------------------------------------------ exportar
+
+    /** Resolución de partida: fina pero acotada para que el mallado no se dispare. */
+    fun resolucionSugerida(): Float =
+        documento.compilar()?.let { yunkil.malla.resolucionSugerida(it) } ?: 0.5f
+
+    /** Celdas que recorrerá el mallador. Sirve para avisar antes de empezar. */
+    fun celdasEstimadas(resolucion: Float): Long =
+        documento.compilar()?.let { yunkil.malla.estimarCeldas(it, resolucion) } ?: 0L
+
+    /**
+     * Exporta a STL binario y devuelve el certificado del examen.
+     *
+     * Devuelve `null` si no hay nada que exportar. Si la malla no pasa el examen no
+     * se escribe archivo alguno: el certificado explica por qué.
+     */
+    fun exportarStl(ruta: String, resolucion: Float, alAvanzar: ((Float) -> Unit)? = null): Certificado? {
+        val nodo = documento.compilar() ?: return rechazarNulo("El documento no tiene material que exportar")
+        val exportador = Exportador(nodo)
+        exportador.alAvanzar = alAvanzar
+        ultimoError = null
+        return exportador.exportarStl(ruta, resolucion)
+    }
+
+    private fun rechazarNulo(motivo: String): Certificado? {
+        ultimoError = motivo
+        return null
     }
 
     // ------------------------------------------------------------------ archivo
