@@ -140,6 +140,180 @@ data class Capsula(val radio: Float, val altura: Float) : SdfNode {
     override val escalares get() = listOf(radio, altura)
 }
 
+/**
+ * Extrusión de un perfil 2D a lo largo del eje Y.
+ *
+ * Es la operación que convierte Yunkil en una herramienta para piezas de verdad:
+ * casi todo lo que se imprime funcional —una escuadra, una brida, una tapa con su
+ * ranura— es un contorno acotado con precisión y estirado un grosor. Hasta ahora
+ * había que aproximarlo combinando primitivas, y eso obliga a hacer aritmética en
+ * lugar de dibujar.
+ *
+ * El perfil se define en XZ, que es el plano del plato: dibujar sobre la mesa y
+ * levantar es como se piensa una pieza impresa.
+ */
+@Serializable
+@SerialName("extrusion")
+data class Extrusion(
+    val perfil: Perfil2D,
+    val altura: Float,
+    val redondeo: Float = 0f,
+) : SdfNode {
+
+    /**
+     * El redondeo **encoge el perfil y la altura antes de engordar el campo**, que
+     * es la misma convención que `Caja` y `Cilindro`. Restarlo en vez de sumarlo
+     * dejaba la pieza dos radios más ancha de lo pedido y, peor, más ancha que sus
+     * propias cotas: el mallador corta por la caja y salían agujeros.
+     */
+    override fun evaluar(p: Vec3): Float {
+        val d2 = perfil.evaluar(Punto2(p.x, p.z)) + redondeo
+        val dy = abs(p.y) - altura * 0.5f + redondeo
+        return min(max(d2, dy), 0f) + length2(max(d2, 0f), max(dy, 0f)) - redondeo
+    }
+
+    override fun cotas(): Aabb {
+        val (lo, hi) = perfil.cotas()
+        // Con el perfil encogido, el redondeo no añade alcance: la pieza acaba
+        // justo donde acaba el perfil y a media altura, con o sin arista viva.
+        return Aabb(
+            Vec3(lo.x, -altura * 0.5f, lo.y),
+            Vec3(hi.x, altura * 0.5f, hi.y),
+        )
+    }
+
+    /**
+     * Los vértices viajan como uniforms y su *cantidad* es topología: cambiar una
+     * cota del perfil no recompila el shader, pero añadir un tramo sí. Es la misma
+     * regla que gobierna la repetición.
+     */
+    override val escalares: List<Float>
+        get() = buildList {
+            add(altura)
+            add(redondeo)
+            add(perfil.redondeo)
+            for (v in perfil.poligono) { add(v.x); add(v.y) }
+        }
+}
+
+/**
+ * Barrido de una sección circular a lo largo del contorno del perfil.
+ *
+ * Es la familia que faltaba: tubos doblados, marcos, aros, asas, canaletas, juntas y
+ * cualquier pieza que sea «un alambre gordo siguiendo un recorrido». Antes había que
+ * aproximarlas encadenando cilindros a mano, que es justo la clase de aritmética en
+ * la que un modelo de lenguaje se equivoca —y donde además los codos quedaban con
+ * cantos vivos porque dos cilindros no empalman solos.
+ *
+ * En SDF sale casi gratis y **exacto**: la distancia a una cadena de segmentos menos
+ * el radio es una cadena de cápsulas. Tres consecuencias que importan:
+ *
+ * - Los codos salen redondeados por construcción, sin operación de acuerdo.
+ * - El campo sigue siendo una distancia verdadera, así que el mallador y el salto de
+ *   espacio libre siguen valiendo sin tocar nada.
+ * - Reutiliza el `Perfil2D` que ya existe, con lo cual el camino se dibuja con la
+ *   misma operación `perfil` y viaja con el mismo empaquetado de uniforms.
+ *
+ * El camino vive en XZ y la sección es perpendicular a él. `cerrado` decide si el
+ * último punto vuelve al primero: cerrado da marcos y aros, abierto da tubos y asas.
+ */
+@Serializable
+@SerialName("barrido")
+data class Barrido(
+    val perfil: Perfil2D,
+    val radio: Float,
+    val cerrado: Boolean = true,
+) : SdfNode {
+
+    /** Tramos que se recorren. Uno abierto tiene un segmento menos que puntos. */
+    val tramos: Int
+        get() = perfil.poligono.size.let { if (cerrado) it else it - 1 }
+
+    override fun evaluar(p: Vec3): Float {
+        val puntos = perfil.poligono
+        val n = puntos.size
+        if (n < 2 || tramos < 1) return Float.MAX_VALUE
+
+        var mejor = Float.MAX_VALUE
+        for (i in 0 until tramos) {
+            val a = puntos[i]
+            val b = puntos[(i + 1) % n]
+
+            val ax = a.x; val az = a.y
+            val ex = b.x - ax; val ez = b.y - az
+            val hx = p.x - ax; val hy = p.y; val hz = p.z - az
+
+            val largo = ex * ex + ez * ez
+            // El camino no tiene componente en Y, así que la proyección solo mira XZ;
+            // la altura entra entera en la distancia, que es lo que hace de la
+            // sección un círculo y no una elipse.
+            val t = if (largo > 1e-20f) ((hx * ex + hz * ez) / largo).coerceIn(0f, 1f) else 0f
+            val cx = hx - ex * t; val cz = hz - ez * t
+            val cuadrado = cx * cx + hy * hy + cz * cz
+            if (cuadrado < mejor) mejor = cuadrado
+        }
+        return sqrt(mejor) - radio
+    }
+
+    override fun cotas(): Aabb {
+        val puntos = perfil.poligono
+        if (puntos.isEmpty()) return Aabb(Vec3.ZERO, Vec3.ZERO)
+
+        // Se mide sobre el polígono crudo y no sobre `perfil.cotas()`: aquel añade el
+        // redondeo de esquina del contorno, que aquí no se usa para nada. Declarar
+        // más alcance del real no rompe nada, pero declarar menos corta la pieza al
+        // mallarla, y eso ya costó un fallo caro en `Extrusion`.
+        var minX = Float.MAX_VALUE; var minZ = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
+        for (v in puntos) {
+            minX = min(minX, v.x); maxX = max(maxX, v.x)
+            minZ = min(minZ, v.y); maxZ = max(maxZ, v.y)
+        }
+        return Aabb(
+            Vec3(minX - radio, -radio, minZ - radio),
+            Vec3(maxX + radio, radio, maxZ + radio),
+        )
+    }
+
+    override val escalares: List<Float>
+        get() = buildList {
+            add(radio)
+            for (v in perfil.poligono) { add(v.x); add(v.y) }
+        }
+}
+
+/**
+ * Revolución de un perfil 2D alrededor del eje Y.
+ *
+ * Da tornillos, poleas, bridas y cualquier pieza torneada con una sola operación.
+ * `desplazamiento` separa el perfil del eje, que es lo que convierte un contorno
+ * cerrado pequeño en un anillo en lugar de un sólido macizo.
+ */
+@Serializable
+@SerialName("revolucion")
+data class Revolucion(
+    val perfil: Perfil2D,
+    val desplazamiento: Float = 0f,
+) : SdfNode {
+
+    override fun evaluar(p: Vec3): Float =
+        perfil.evaluar(Punto2(length2(p.x, p.z) - desplazamiento, p.y))
+
+    override fun cotas(): Aabb {
+        val (lo, hi) = perfil.cotas()
+        // Al girar, el alcance radial es el punto del perfil más lejano del eje.
+        val radio = max(abs(lo.x + desplazamiento), abs(hi.x + desplazamiento))
+        return Aabb(Vec3(-radio, lo.y, -radio), Vec3(radio, hi.y, radio))
+    }
+
+    override val escalares: List<Float>
+        get() = buildList {
+            add(desplazamiento)
+            add(perfil.redondeo)
+            for (v in perfil.poligono) { add(v.x); add(v.y) }
+        }
+}
+
 // ---------------------------------------------------------------- booleanas
 
 /**
@@ -170,9 +344,20 @@ data class Diferencia(
 ) : SdfNode {
     override fun evaluar(p: Vec3) = smoothMax(a.evaluar(p), -b.evaluar(p), fusion)
 
-    // Restar nunca añade material, así que las cotas de `a` bastan; la fusión sí
-    // puede desbordarlas ligeramente.
-    override fun cotas() = a.cotas().expanded(fusion)
+    /**
+     * Las cotas del minuendo, **sin margen por la fusión**.
+     *
+     * `smoothMax` es siempre mayor o igual que `max`, y mayor significa *menos* material:
+     * una resta con acuerdo solo puede quitar más, nunca añadir. Donde `d < 0` también
+     * `da < 0`, así que el material está contenido en el de `a` y sus cotas son
+     * conservadoras por construcción.
+     *
+     * Expandía por `fusion`, y el coste no era cosmético: lo encontró el banco de modelado.
+     * Una caja de 60 mm con el canto interior redondeado —que es lo correcto— declaraba 62,
+     * y de esas cotas beben `acotar` para escalar el conjunto y el analizador para
+     * muestrear. Pedir «60 de ancho» dejaba la pieza en 58.
+     */
+    override fun cotas() = a.cotas()
     override val escalares get() = listOf(fusion)
     override val hijos get() = listOf(a, b)
 }
@@ -185,9 +370,115 @@ data class Interseccion(
     val fusion: Float = 0f,
 ) : SdfNode {
     override fun evaluar(p: Vec3) = smoothMax(a.evaluar(p), b.evaluar(p), fusion)
-    override fun cotas() = a.cotas().intersect(b.cotas()).expanded(fusion)
+    // Sin margen por la fusión, por el mismo motivo que en `Diferencia`: `smoothMax` solo
+    // puede subir el campo, y subirlo es quitar material. Lo común de dos cuerpos con
+    // acuerdo cabe en lo común de sus cotas.
+    override fun cotas() = a.cotas().intersect(b.cotas())
     override val escalares get() = listOf(fusion)
     override val hijos get() = listOf(a, b)
+}
+
+/** Qué booleana lleva el acuerdo local. */
+@Serializable
+enum class ModoDeAcuerdo { UNION, DIFERENCIA, INTERSECCION }
+
+/**
+ * Booleana con acuerdo **limitado a un sitio**: el filete de una arista concreta.
+ *
+ * `fusion` en las booleanas de arriba redondea *todo* el encuentro entre dos sólidos, y
+ * eso no es lo que se pide cuando alguien señala un canto y dice «este, a 2 mm». Aquí la
+ * anchura de la mezcla se multiplica por una caída centrada en [centro]: dentro de la
+ * esfera de radio [radio] hay filete, fuera la booleana vuelve a ser exacta.
+ *
+ * La ventaja frente a un kernel de contornos es que **no hace falta topología**: la
+ * arista se elige apuntando con el cursor y el punto de impacto es el centro. En B-rep
+ * hay que identificar la arista, sus caras y resolver los solapes; aquí es un número más.
+ *
+ * Y la limitación, que se declara en vez de esconderse: es un filete «de bola». Si la
+ * arista se curva dentro de la esfera de influencia, el radio no sale constante a lo
+ * largo de ella. Para una pieza impresa a 0,4 mm de boquilla no se aprecia; para una
+ * superficie de producto sí, y para eso está Plasticity.
+ */
+@Serializable
+@SerialName("acuerdoLocal")
+data class AcuerdoLocal(
+    val a: SdfNode,
+    val b: SdfNode,
+    val modo: ModoDeAcuerdo,
+    val centro: Vec3,
+    val radio: Float,
+    val fusion: Float,
+) : SdfNode {
+
+    override fun evaluar(p: Vec3): Float {
+        val da = a.evaluar(p)
+        val db = b.evaluar(p)
+        val k = fusion * caidaDeAcuerdo((p - centro).length(), radio)
+        return when (modo) {
+            ModoDeAcuerdo.UNION -> smoothMin(da, db, k)
+            ModoDeAcuerdo.DIFERENCIA -> smoothMax(da, -db, k)
+            ModoDeAcuerdo.INTERSECCION -> smoothMax(da, db, k)
+        }
+    }
+
+    // Las mismas cotas que la booleana equivalente, con el mismo criterio: unir con acuerdo
+    // añade material y hay que declararlo; restar e intersecar solo pueden quitar más, así
+    // que expandir ahí sería declarar un alcance que la pieza no tiene.
+    override fun cotas(): Aabb = when (modo) {
+        ModoDeAcuerdo.UNION -> a.cotas().union(b.cotas()).expanded(fusion)
+        ModoDeAcuerdo.DIFERENCIA -> a.cotas()
+        ModoDeAcuerdo.INTERSECCION -> a.cotas().intersect(b.cotas())
+    }
+
+    override val escalares get() = listOf(centro.x, centro.y, centro.z, radio, fusion)
+    override val hijos get() = listOf(a, b)
+
+    /**
+     * Cota del gradiente de este nodo, mayor que 1 cuando hay filete.
+     *
+     * De aquí sale el paso de trazado seguro. Con un filete pequeño respecto a su alcance
+     * el coste es casi nulo, y solo se paga de verdad cuando la mezcla es tan ancha como
+     * la esfera que la limita.
+     */
+    val lipschitz: Float
+        get() = if (radio <= 0f) 1f else 1f + FACTOR_DE_GRADIENTE * (fusion / radio).coerceAtMost(1f)
+
+    companion object {
+        /**
+         * Gradiente extra por unidad de `fusion / radio`, **derivado y comprobado**.
+         *
+         * Una mezcla cuya anchura cambia con la posición no es exactamente 1-Lipschitz: la
+         * derivada de la caída añade su parte. El mínimo suave polinómico no puede
+         * apartarse del mínimo exacto más de `k/4`, así que `|∂d/∂k| ≤ 1/4`; y la caída
+         * `(1−t²)²` tiene pendiente máxima `4t(1−t²) = 1,54` en `t = 1/√3`. El producto es
+         * `1,54 / 4 = 0,385` por cada unidad de `fusion/radio`.
+         *
+         * No es un número a ojo: una prueba mide el gradiente peor sobre 20.000 puntos con
+         * `fusion = radio` y sale 1,383 frente al 1,385 que predice esta cuenta.
+         */
+        const val FACTOR_DE_GRADIENTE = 0.385f
+
+        /** El peor caso, con la mezcla tan ancha como su alcance. */
+        const val LIPSCHITZ_MAXIMO = 1f + FACTOR_DE_GRADIENTE + 0.005f
+    }
+}
+
+/**
+ * Peso de la influencia del acuerdo: 1 en el centro, 0 a partir del radio.
+ *
+ * `(1 − t²)²` es C¹ en los dos extremos —su derivada se anula en t=0 y en t=1—, y eso
+ * importa: una caída con un codo metería un salto en el gradiente del campo justo donde
+ * el filete se acaba, y el trazado por esferas lo vería como una arista falsa.
+ *
+ * Radio cero es «en ningún sitio», no «en todas partes»: sin esta guarda la división
+ * dejaría el campo entero en NaN.
+ */
+internal fun caidaDeAcuerdo(distancia: Float, radio: Float): Float {
+    if (radio <= 0f) return 0f
+    val t = distancia / radio
+    if (t >= 1f) return 0f
+    val u = 1f - t * t
+    return u * u
 }
 
 // ---------------------------------------------------------------- modificadores
@@ -330,9 +621,23 @@ fun SdfNode.preorden(): List<SdfNode> {
     return salida
 }
 
-/** Todos los escalares del árbol en orden canónico: el contenido del buffer de uniforms. */
+/**
+ * Todo el contenido del buffer de uniforms: los escalares en preorden y, a
+ * continuación, las cajas de cada nodo (mínimo y máximo, 6 floats por nodo, en el
+ * mismo orden del preorden).
+ *
+ * Las cajas van detrás de los escalares a propósito: el orden que comprueba la
+ * paridad —los escalares— no cambia, y la marcha podada de `MslGenerator` las lee
+ * desde el mismo buffer sin desalinear nada.
+ */
 fun SdfNode.empaquetarUniforms(): FloatArray {
-    val salida = ArrayList<Float>()
-    preorden().forEach { salida.addAll(it.escalares) }
+    val orden = preorden()
+    val salida = ArrayList<Float>(orden.sumOf { it.escalares.size } + orden.size * 6)
+    orden.forEach { salida.addAll(it.escalares) }
+    orden.forEach { c ->
+        val caja = c.cotas()
+        salida.add(caja.min.x); salida.add(caja.min.y); salida.add(caja.min.z)
+        salida.add(caja.max.x); salida.add(caja.max.y); salida.add(caja.max.z)
+    }
     return salida.toFloatArray()
 }

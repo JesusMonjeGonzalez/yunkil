@@ -8,6 +8,18 @@ import kotlin.random.Random
 /** Escribe datos binarios en disco. La única operación del núcleo que toca el sistema. */
 expect fun escribirArchivo(ruta: String, datos: ByteArray): Boolean
 
+/** Lee un archivo entero, o `null` si no se puede. Para traer mallas de fuera. */
+expect fun leerArchivo(ruta: String): ByteArray?
+
+/**
+ * Añade una línea de texto al final de un archivo, creándolo si no existe.
+ *
+ * No se puede resolver con [escribirArchivo] leyendo y reescribiendo: el registro
+ * crece con el uso y reescribirlo entero en cada apunte lo pondría en riesgo cada
+ * vez. Aquí solo se abre en modo añadir, se escribe al final y se cierra.
+ */
+expect fun anadirLinea(ruta: String, linea: String): Boolean
+
 /**
  * El certificado de una exportación.
  *
@@ -22,6 +34,8 @@ data class Certificado(
     val cerrada: Boolean,
     val bienOrientada: Boolean,
     val degenerados: Int,
+    /** Parejas de triángulos que se atraviesan. Cero es la única cifra aceptable. */
+    val autoIntersecciones: Int,
     val desviacionMaxima: Float,
     val volumenMalla: Float,
     val volumenAnalitico: Float,
@@ -33,15 +47,40 @@ data class Certificado(
 
     /** Solo se entrega el archivo si esto es cierto. */
     val apto: Boolean
-        get() = cerrada && bienOrientada && degenerados == 0 && volumenMalla > 0f
+        get() = cerrada && bienOrientada && degenerados == 0 && autoIntersecciones == 0 &&
+            volumenMalla > 0f &&
+            volumenAnalitico > 0f && desviacionMaxima <= maxOf(resolucion * 1.5f, 0.05f) &&
+            errorDeVolumen <= 0.10f
+
+    /**
+     * La malla salió vacía: el sólido es más fino que la rejilla que lo mide.
+     *
+     * Pasa con una chapa de 0,3 mm mallada a 1 mm —medido: cero triángulos—, y hay
+     * que decirlo con esas palabras. Sin esta línea el informe enseña «MALLA NO APTA,
+     * triángulos 0, volumen 0» y deja al usuario deduciendo, cuando la causa es
+     * concreta y el arreglo también.
+     */
+    val salioVacia: Boolean get() = triangulos == 0
 
     fun resumen(): String = buildString {
         appendLine(if (apto) "Malla apta para imprimir" else "MALLA NO APTA")
+        if (salioVacia) {
+            appendLine(
+                "No salió ni un triángulo: el detalle más fino de la pieza es menor que " +
+                    "la resolución de ${formato(resolucion)} mm y la malla se queda sin nada " +
+                    "que dibujar. Baja la resolución o engorda la pared.",
+            )
+        }
         appendLine("Triángulos: $triangulos")
         appendLine("Resolución: ${formato(resolucion)} mm")
         appendLine("Desviación máxima: ${formato(desviacionMaxima)} mm")
         appendLine("Volumen: ${formato(volumenMalla / 1000f)} cm³ (error ${formato(errorDeVolumen * 100f)} %)")
         appendLine(if (cerrada) "Sólido estanco: sí" else "Sólido estanco: NO — hay agujeros")
+        appendLine(
+            if (autoIntersecciones == 0) "Sin auto-intersecciones: sí"
+            else "Auto-intersecciones: NO — la superficie se cruza consigo misma " +
+                "en $autoIntersecciones sitios o más",
+        )
         append(if (bienOrientada) "Normales coherentes: sí" else "Normales coherentes: NO")
     }
 
@@ -62,7 +101,40 @@ class Exportador(private val nodo: SdfNode) {
 
     var alAvanzar: ((Float) -> Unit)? = null
 
-    fun exportarStl(ruta: String, resolucion: Float): Certificado {
+    /**
+     * [resolucionMinima] es el suelo del reintento. Existe por las mallas importadas:
+     * su campo es una rejilla con un paso concreto, y afinar por debajo de él no saca
+     * detalle —no está— sino artefactos. Refinar a ciegas convertía una pieza que
+     * salía estanca a 0,4 mm en una agujereada a 0,125.
+     */
+    fun exportarStl(ruta: String, resolucion: Float, resolucionMinima: Float = 0f): Certificado =
+        exportar(ruta, resolucion, resolucionMinima) { malla, paso ->
+            Stl.binario(malla, "Yunkil ${formatoCorto(paso)}mm")
+        }
+
+    /**
+     * Lo mismo, en 3MF: el formato que sí dice en qué unidades está la pieza.
+     *
+     * Pasa exactamente por el mismo examen que el STL —y por la misma negativa a
+     * entregar una malla que no lo pasa—, porque el formato del archivo no cambia en
+     * nada si el sólido está roto. Lo que cambia es lo que el laminador entiende al
+     * abrirlo: milímetros declarados y la pieza apoyada en el plato con la Z arriba.
+     */
+    fun exportarTresMf(
+        ruta: String,
+        resolucion: Float,
+        resolucionMinima: Float = 0f,
+        titulo: String = "Yunkil",
+    ): Certificado = exportar(ruta, resolucion, resolucionMinima) { malla, _ ->
+        TresMf.paquete(malla, titulo)
+    }
+
+    private fun exportar(
+        ruta: String,
+        resolucion: Float,
+        resolucionMinima: Float,
+        empaquetar: (Malla, Float) -> ByteArray,
+    ): Certificado {
         var actual = resolucion
         var intento = 0
 
@@ -76,7 +148,7 @@ class Exportador(private val nodo: SdfNode) {
 
             // Un reintento con el doble de detalle: la mayoría de defectos vienen de
             // una resolución demasiado gruesa para el detalle más fino de la pieza.
-            if (!certificado.apto && intento == 0) {
+            if (!certificado.apto && intento == 0 && actual * 0.5f >= resolucionMinima) {
                 intento++
                 actual *= 0.5f
                 continue
@@ -84,7 +156,7 @@ class Exportador(private val nodo: SdfNode) {
 
             if (!certificado.apto) return certificado
 
-            val bytes = Stl.binario(malla, "Yunkil ${formatoCorto(actual)}mm")
+            val bytes = empaquetar(malla, actual)
             val escrito = escribirArchivo(ruta, bytes)
             alAvanzar?.invoke(1f)
 
@@ -102,6 +174,7 @@ class Exportador(private val nodo: SdfNode) {
             cerrada = topologia.esCerrada,
             bienOrientada = topologia.estaBienOrientada,
             degenerados = topologia.triangulosDegenerados,
+            autoIntersecciones = malla.autoIntersecciones(),
             desviacionMaxima = medirDesviacion(malla),
             volumenMalla = malla.volumen(),
             volumenAnalitico = estimarVolumen(),

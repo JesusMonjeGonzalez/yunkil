@@ -30,6 +30,10 @@ class ContorneadoDual(
     private val resolucion: Float,
 ) {
 
+    init {
+        require(resolucion.isFinite() && resolucion > 0f) { "La resolución debe ser finita y positiva" }
+    }
+
     /** Aviso de progreso entre 0 y 1. Se llama pocas veces, no en el bucle interno. */
     var alAvanzar: ((Float) -> Unit)? = null
 

@@ -207,6 +207,21 @@ class CertificadoTest {
     }
 
     @Test
+    fun `el 3MF pasa por el mismo examen y se escribe entero`() {
+        val ruta = "build/prueba-export.3mf"
+        val editor = yunkil.doc.Editor(ModelosDemo.esferaSuelta())
+
+        val certificado = editor.exportarPieza(ruta, 1.5f)
+
+        assertTrue(certificado != null)
+        // El examen es el mismo a propósito: el formato del archivo no cambia nada si
+        // el sólido está roto, y un 3MF con una malla abierta es tan inservible como
+        // un STL con una malla abierta.
+        assertTrue(certificado!!.apto, certificado.resumen())
+        assertTrue(certificado.bytes > 1000, "no se escribió el paquete: ${certificado.bytes} bytes")
+    }
+
+    @Test
     fun `un documento vacio no exporta nada`() {
         val editor = yunkil.doc.Editor(yunkil.doc.Documento.vacio())
         assertEquals(null, editor.exportarStl("build/no-deberia-existir.stl", 1f))

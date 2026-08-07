@@ -81,6 +81,16 @@ kernel void yk_paridad(constant float *u          [[buffer(0)]],
                        uint id [[thread_position_in_grid]]) {
     salida[id] = yk_map(pts[id].xyz, u);
 }
+
+kernel void yk_poda(constant float *u          [[buffer(0)]],
+                    device const float4 *pts   [[buffer(1)]],
+                    device float *salida       [[buffer(2)]],
+                    uint id [[thread_position_in_grid]]) {
+    // La marcha podada nunca puede exagerar: si devolviera más que el campo real,
+    // el trazado se pasaría de largo. Se comprueba contra `yk_map` en la GPU para
+    // que el desvío de punto flotante sea el mismo en las dos llamadas.
+    salida[id] = yk_marcha(pts[id].xyz, u);
+}
 """
 
 guard CommandLine.arguments.count >= 2 else {
@@ -131,7 +141,11 @@ for dir in directorios {
     guard let funcion = biblioteca.makeFunction(name: "yk_paridad") else {
         fallar("\(caso.nombre): no se encontró yk_paridad")
     }
+    guard let funcionPoda = biblioteca.makeFunction(name: "yk_poda") else {
+        fallar("\(caso.nombre): no se encontró yk_poda")
+    }
     let pipeline = try dispositivo.makeComputePipelineState(function: funcion)
+    let pipelinePoda = try dispositivo.makeComputePipelineState(function: funcionPoda)
 
     let n = caso.puntos.count
     let bytesU = max(caso.uniforms.count, 1) * MemoryLayout<Float>.stride
@@ -143,46 +157,81 @@ for dir in directorios {
         bytes: caso.puntos, length: n * MemoryLayout<SIMD4<Float>>.stride, options: .storageModeShared)!
     let bufS = dispositivo.makeBuffer(
         length: n * MemoryLayout<Float>.stride, options: .storageModeShared)!
+    let bufS2 = dispositivo.makeBuffer(
+        length: n * MemoryLayout<Float>.stride, options: .storageModeShared)!
 
-    let cmd = cola.makeCommandBuffer()!
-    let enc = cmd.makeComputeCommandEncoder()!
-    enc.setComputePipelineState(pipeline)
-    enc.setBuffer(bufU, offset: 0, index: 0)
-    enc.setBuffer(bufP, offset: 0, index: 1)
-    enc.setBuffer(bufS, offset: 0, index: 2)
-    let ancho = min(pipeline.maxTotalThreadsPerThreadgroup, 256)
-    enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: ancho, height: 1, depth: 1))
-    enc.endEncoding()
-    cmd.commit()
-    cmd.waitUntilCompleted()
+    // Devuelve el error del command buffer en vez de dejarlo dentro: cuando esto se
+    // extrajo a una función para poder lanzar también el shader podado, el `cmd` que
+    // se consultaba después se quedó fuera de alcance y el arnés dejó de compilar.
+    // Un arnés que no compila es una comprobación que no se está haciendo.
+    func lanzar(_ pipeline: MTLComputePipelineState, _ salida: MTLBuffer) -> Error? {
+        let cmd = cola.makeCommandBuffer()!
+        let enc = cmd.makeComputeCommandEncoder()!
+        enc.setComputePipelineState(pipeline)
+        enc.setBuffer(bufU, offset: 0, index: 0)
+        enc.setBuffer(bufP, offset: 0, index: 1)
+        enc.setBuffer(salida, offset: 0, index: 2)
+        let ancho = min(pipeline.maxTotalThreadsPerThreadgroup, 256)
+        enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: ancho, height: 1, depth: 1))
+        enc.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        return cmd.error
+    }
 
-    if let err = cmd.error {
+    if let err = lanzar(pipeline, bufS) {
         print("✗ \(caso.nombre): la GPU falló — \(err)")
+        fallos += 1
+        continue
+    }
+    if let err = lanzar(pipelinePoda, bufS2) {
+        print("✗ \(caso.nombre): la GPU falló en la poda — \(err)")
         fallos += 1
         continue
     }
 
     let obtenido = UnsafeBufferPointer(
         start: bufS.contents().bindMemory(to: Float.self, capacity: n), count: n)
+    let podado = UnsafeBufferPointer(
+        start: bufS2.contents().bindMemory(to: Float.self, capacity: n), count: n)
 
     var peor: Float = 0
     var indicePeor = 0
     var desviados = 0
+    var podasIncorrectas = 0
+    var peorPoda: Float = 0
     for i in 0..<n {
         let diff = abs(obtenido[i] - caso.esperado[i])
         if diff > peor { peor = diff; indicePeor = i }
         if diff > tolerancia { desviados += 1 }
+        // La poda devuelve una cota inferior: nunca más lejos que el campo real.
+        // El margen es el de la tolerancia, para el desvío de punto flotante.
+        // La poda es **exacta**: se salta ramas que no pueden ganar y el valor del
+        // campo no cambia. Así que aquí se compara la igualdad y no solo que la
+        // marcha no se pase.
+        //
+        // Comprobar solo «no se pasa» dejaba pasar la mitad del fallo: cuando el
+        // cuerpo podado leía los uniforms equivocados y salía un número *menor*, la
+        // comprobación lo daba por bueno. Era seguro para el trazado y era otra
+        // pieza en la pantalla.
+        let exceso = abs(podado[i] - obtenido[i])
+        if exceso > tolerancia { podasIncorrectas += 1 }
+        if exceso > peorPoda { peorPoda = exceso }
     }
     peorGlobal = max(peorGlobal, peor)
 
     let nombre = caso.nombre.padding(toLength: 22, withPad: " ", startingAt: 0)
-    if desviados == 0 {
+    if desviados == 0 && podasIncorrectas == 0 {
         print("✓ \(nombre) \(n) puntos · peor desvío \(String(format: "%.2e", peor))")
     } else {
         fallos += 1
         let p = caso.puntos[indicePeor]
         print("✗ \(nombre) \(desviados)/\(n) fuera de tolerancia · peor \(String(format: "%.4e", peor))")
+        if podasIncorrectas > 0 {
+            print("    \(podasIncorrectas) puntos donde la marcha no coincide con el campo, " +
+                  "hasta \(String(format: "%.4e", peorPoda)) mm de diferencia")
+        }
         print("    en (\(p.x), \(p.y), \(p.z)): Kotlin \(caso.esperado[indicePeor]) vs Metal \(obtenido[indicePeor])")
     }
 }

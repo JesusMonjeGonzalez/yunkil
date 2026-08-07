@@ -279,7 +279,13 @@ class UniformsTest {
 
     @Test
     fun `el empaquetado sigue exactamente el preorden del arbol`() {
-        val esperado = modelo.preorden().flatMap { it.escalares }
+        // Los escalares van primero, en preorden —es el orden que comprueba la
+        // paridad— y las cajas (6 floats por nodo) después, en el mismo orden.
+        val orden = modelo.preorden()
+        val esperado = orden.flatMap { it.escalares } + orden.flatMap { n ->
+            val c = n.cotas()
+            listOf(c.min.x, c.min.y, c.min.z, c.max.x, c.max.y, c.max.z)
+        }
         assertEquals(esperado, modelo.empaquetarUniforms().toList())
     }
 

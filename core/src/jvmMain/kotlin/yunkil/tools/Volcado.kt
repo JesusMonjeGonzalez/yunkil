@@ -1,5 +1,6 @@
 package yunkil.tools
 
+import yunkil.kernel.AcuerdoLocal
 import yunkil.kernel.Axis
 import yunkil.kernel.Caja
 import yunkil.kernel.Capsula
@@ -8,6 +9,7 @@ import yunkil.kernel.Cono
 import yunkil.kernel.Diferencia
 import yunkil.kernel.Esfera
 import yunkil.kernel.Interseccion
+import yunkil.kernel.ModoDeAcuerdo
 import yunkil.kernel.Quat
 import yunkil.kernel.Repeticion
 import yunkil.kernel.SdfNode
@@ -116,6 +118,36 @@ private fun casos(): List<Pair<String, SdfNode>> = listOf(
     "diferencia_fusionada" to Diferencia(Caja(Vec3(12f, 12f, 12f)), Esfera(15f), fusion = 2f),
     "interseccion" to Interseccion(Caja(Vec3(10f, 10f, 10f)), Esfera(13f)),
 
+    // Los filetes locales llevan una caída propia en el shader (`yk_caida`). Es la parte
+    // del acuerdo local que puede divergir en silencio: la matemática es corta pero si el
+    // peso de la mezcla no sale igual en los dos lados, el viewport enseñaría un canto
+    // redondeado donde el analizador ve una arista viva. Los tres modos, porque cada uno
+    // emite una expresión distinta.
+    "acuerdo_union" to AcuerdoLocal(
+        Caja(Vec3(10f, 10f, 10f)),
+        desplazada(Caja(Vec3(10f, 10f, 10f)), 20f),
+        ModoDeAcuerdo.UNION,
+        centro = Vec3(10f, 10f, 0f),
+        radio = 6f,
+        fusion = 4f,
+    ),
+    "acuerdo_diferencia" to AcuerdoLocal(
+        Caja(Vec3(14f, 14f, 14f)),
+        Esfera(16f),
+        ModoDeAcuerdo.DIFERENCIA,
+        centro = Vec3(8f, 8f, 8f),
+        radio = 7f,
+        fusion = 3f,
+    ),
+    "acuerdo_interseccion" to AcuerdoLocal(
+        Caja(Vec3(10f, 10f, 10f)),
+        Esfera(13f),
+        ModoDeAcuerdo.INTERSECCION,
+        centro = Vec3(6f, 6f, 0f),
+        radio = 5f,
+        fusion = 2.5f,
+    ),
+
     "transformado" to Transformado(
         Caja(Vec3(10f, 4f, 6f)),
         Transform(
@@ -152,6 +184,15 @@ private fun casos(): List<Pair<String, SdfNode>> = listOf(
             eje = Axis.Z,
         ),
     ),
+
+    // Y los modelos que la aplicación abre de verdad, compilados desde el documento.
+    //
+    // Los casos de arriba se escriben a mano para cubrir cada nodo; estos cubren lo
+    // que el usuario tiene delante al arrancar. La distinción dejó de ser teórica el
+    // día que la marcha podada devolvía 20 mm de más: el fallo estaba en la unión de
+    // varios hijos con acuerdo, que es exactamente la forma del demo del soporte.
+    "demo_soporte" to (yunkil.doc.ModelosDemo.soporte().compilar() ?: Esfera(1f)),
+    "demo_rejilla" to (yunkil.doc.ModelosDemo.rejilla().compilar() ?: Esfera(1f)),
 )
 
 private fun desplazada(n: SdfNode, x: Float) =

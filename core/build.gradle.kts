@@ -26,6 +26,19 @@ kotlin {
 }
 
 /** Vuelca los casos de paridad para que el arnés de Metal los verifique. */
+tasks.register<JavaExec>("banco") {
+    group = "verification"
+    description = "Corre peticiones reales contra el modelo local y mide qué sale"
+    val compilacion = kotlin.jvm().compilations.getByName("main")
+    dependsOn(compilacion.compileTaskProvider)
+    classpath(compilacion.output.allOutputs, compilacion.runtimeDependencyFiles)
+    mainClass.set("yunkil.tools.BancoKt")
+    // El banco no falla la build: que un modelo local acierte 6 de 8 es un dato, no un
+    // error de compilación, y encadenarlo a `check` dejaría el proyecto rojo por algo
+    // que depende de si el stack está arriba.
+    isIgnoreExitValue = true
+}
+
 tasks.register<JavaExec>("volcarParidad") {
     group = "verification"
     description = "Genera shaders y distancias de referencia en build/paridad"

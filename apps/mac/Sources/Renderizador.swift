@@ -4,11 +4,28 @@ import MetalKit
 import YunkilCore
 import simd
 
+/// Plano de sección en vivo: un punto y una normal en milímetros del mundo.
+/// Es estado de vista —como la cámara— y vive fuera del documento.
+struct PlanoDeSeccion {
+    var punto: SIMD3<Float>
+    var normal: SIMD3<Float>
+    /// Grosor mínimo de pared del perfil activo; el tinte de la cara de corte
+    /// compara contra esto. Lo manda el núcleo: es un umbral de fabricación.
+    var grosorMinimoPared: Float
+}
+
 /// Dibuja el documento raymarcheando el shader que generó el núcleo Kotlin.
 ///
 /// El reparto de responsabilidades es deliberado: aquí no hay geometría ni reglas,
 /// solo el oficio de poner píxeles. Todo lo que sabe de sólidos vive en Kotlin.
 final class Renderizador: NSObject, MTKViewDelegate {
+
+    private struct EscenaGPU {
+        var plato: SIMD4<Float> // semiancho, semifondo, altura, paso de rejilla
+        var plano: SIMD4<Float> // xyz = punto del plano de sección, w = 1 activo
+        var planoN: SIMD4<Float> // xyz = normal del plano, w = grosor mínimo de pared
+        var planoR: SIMD4<Float> // x = semilado del rectángulo visible del plano
+    }
 
     private let dispositivo: MTLDevice
     private let cola: MTLCommandQueue
@@ -17,9 +34,17 @@ final class Renderizador: NSObject, MTKViewDelegate {
     private let editor: Editor
     private var bufferDeUniforms: MTLBuffer?
     private var huellaCompilada: String = ""
+    private var alturaPlato: Float = 0
 
     var camara = CamaraOrbital()
     private let gobernador: GobernadorDeRecursos
+
+    /// Plano de sección en vivo, cuando la sección está activa.
+    ///
+    /// Es estado de vista, como la cámara: no entra en el documento ni en el historial.
+    /// El shader lo usa para recortar el campo (`max(d, plano)`) y para teñir la cara de
+    /// corte según el grosor de pared.
+    var planoDeSeccion: PlanoDeSeccion?
 
     private(set) var estado: String = ""
     var alActualizarEstado: ((String) -> Void)?
@@ -49,6 +74,7 @@ final class Renderizador: NSObject, MTKViewDelegate {
         vista.clearColor = MTLClearColor(red: 0.04, green: 0.045, blue: 0.055, alpha: 1)
 
         encuadrar()
+        actualizarAlturaPlato()
         compilar()
         actualizarUniforms()
     }
@@ -63,6 +89,7 @@ final class Renderizador: NSObject, MTKViewDelegate {
     func sincronizar(recompilar: Bool) {
         if recompilar || pipeline == nil { compilar() }
         actualizarUniforms()
+        actualizarAlturaPlato()
     }
 
     func encuadrar() {
@@ -108,6 +135,24 @@ final class Renderizador: NSObject, MTKViewDelegate {
         }
     }
 
+    private func actualizarAlturaPlato() {
+        // Índice 1: el plato está en la cota mínima en **Y**, que es la vertical.
+        // Con `.first` se leía la X, y en cualquier pieza más ancha que alta el
+        // plato aparecía flotando o cortándola por la mitad.
+        let cotas = editor.cotaMinima
+        alturaPlato = (cotas.count > 1 ? cotas[1].floatValue : 0) - 0.5
+    }
+
+    /// Semilado del rectángulo visible del plano de sección: cubre el modelo
+    /// con un margen, para que la hoja se vea y se pueda agarrar.
+    private func semiladoDelPlano() -> Float {
+        let mn = editor.cotaMinima.map { $0.floatValue }
+        let mx = editor.cotaMaxima.map { $0.floatValue }
+        guard mn.count == 3, mx.count == 3 else { return 80 }
+        let lados = SIMD3<Float>(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2])
+        return max(simd_reduce_max(lados) * 0.6, 40)
+    }
+
     // MARK: - MTKViewDelegate
 
     func mtkView(_ vista: MTKView, drawableSizeWillChange tamano: CGSize) {}
@@ -123,7 +168,12 @@ final class Renderizador: NSObject, MTKViewDelegate {
 
         var camaraGPU = camara.empaquetar(
             resolucion: SIMD2<Float>(Float(vista.drawableSize.width), Float(vista.drawableSize.height)),
-            escalaPasos: gobernador.escalaDePasos,
+            // El paso lo deciden dos cosas a la vez: lo que el gobernador cree que cabe en
+            // el fotograma, y lo que el campo permite. Un filete local mezcla con una
+            // anchura que cambia con la posición, y ahí avanzar la distancia entera se
+            // salta la superficie justo en el canto, que es donde se está mirando. El
+            // núcleo publica ese límite porque es él quien sabe qué hay en el árbol.
+            escalaPasos: gobernador.escalaDePasos * editor.pasoSeguroDelShader,
             // El umbral de impacto sigue a la distancia de la cámara: fijo en
             // milímetros daría bordes sucios de lejos y gastaría pasos de cerca.
             epsilonRelativo: 0.0006
@@ -132,6 +182,18 @@ final class Renderizador: NSObject, MTKViewDelegate {
         codificador.setRenderPipelineState(pipeline)
         codificador.setFragmentBytes(&camaraGPU, length: MemoryLayout<CamaraGPU>.stride, index: 0)
         codificador.setFragmentBuffer(buffer, offset: 0, index: 1)
+        var escena = EscenaGPU(
+            plato: SIMD4<Float>(128, 128, alturaPlato, 10),
+            plano: SIMD4<Float>(0, 0, 0, 0),
+            planoN: SIMD4<Float>(0, 1, 0, 0.8),
+            planoR: SIMD4<Float>(80, 0, 0, 0)
+        )
+        if let plano = planoDeSeccion {
+            escena.plano = SIMD4<Float>(plano.punto.x, plano.punto.y, plano.punto.z, 1)
+            escena.planoN = SIMD4<Float>(plano.normal.x, plano.normal.y, plano.normal.z, plano.grosorMinimoPared)
+            escena.planoR.x = semiladoDelPlano()
+        }
+        codificador.setFragmentBytes(&escena, length: MemoryLayout<EscenaGPU>.stride, index: 2)
         codificador.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         codificador.endEncoding()
 

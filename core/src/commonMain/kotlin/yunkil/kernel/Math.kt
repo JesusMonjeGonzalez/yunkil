@@ -49,6 +49,14 @@ data class Quat(val x: Float, val y: Float, val z: Float, val w: Float) {
 
     fun conjugate() = Quat(-x, -y, -z, w)
 
+    /** Composición: `a * b` aplica primero `b` y después `a`. */
+    operator fun times(o: Quat) = Quat(
+        w * o.x + x * o.w + y * o.z - z * o.y,
+        w * o.y - x * o.z + y * o.w + z * o.x,
+        w * o.z + x * o.y - y * o.x + z * o.w,
+        w * o.w - x * o.x - y * o.y - z * o.z,
+    )
+
     /** Matriz de rotación 3x3 en orden por filas. */
     fun toMatrixRowMajor(): FloatArray {
         val q = normalized()
@@ -105,6 +113,19 @@ data class Transform(
 
     fun localToWorld(p: Vec3): Vec3 =
         applyMatrix(rotation.toMatrixRowMajor(), p * scale) + translation
+
+    /**
+     * Encadena esta transformación con la de un hijo, de modo que
+     * `componer(h).localToWorld(p)` equivale a aplicar primero `h` y luego esta.
+     *
+     * Hace falta para razonar sobre una pieza anidada en coordenadas del mundo, que
+     * es lo que necesita el analizador para decir *qué* pieza causó un aviso.
+     */
+    fun componer(hijo: Transform) = Transform(
+        rotation = (rotation * hijo.rotation).normalized(),
+        translation = localToWorld(hijo.translation),
+        scale = scale * hijo.scale,
+    )
 
     companion object {
         val IDENTITY = Transform()

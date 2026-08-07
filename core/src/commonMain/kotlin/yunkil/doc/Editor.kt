@@ -1,8 +1,45 @@
 package yunkil.doc
 
 import kotlinx.serialization.json.Json
+import yunkil.fabricacion.AccionCorrectora
+import yunkil.fabricacion.AnalizadorFdm
+import yunkil.fabricacion.BuscadorDeOrientacion
+import yunkil.fabricacion.Correccion
+import yunkil.fabricacion.Estandares
+import yunkil.fabricacion.InformeDeFabricacion
+import yunkil.fabricacion.OrientacionEvaluada
+import yunkil.fabricacion.AjusteDeTaladro
+import yunkil.fabricacion.PerfilFabricacion
+import yunkil.fabricacion.Roscas
+import yunkil.ia.Aplicador
+import yunkil.ia.Asiento
+import yunkil.ia.Bitacora
+import yunkil.ia.Cara
+import yunkil.ia.ClaseDeFallo
+import yunkil.ia.Colocar
+import yunkil.ia.Conversacion
+import yunkil.ia.Desenlace
+import yunkil.ia.Explicacion
+import yunkil.ia.LineaExplicada
+import yunkil.ia.Reparo
+import yunkil.ia.Rol
+import yunkil.ia.Turno
+import yunkil.ia.Interprete
+import yunkil.ia.PlanDeModelado
+import yunkil.ia.ResultadoDeAplicacion
+import yunkil.ia.ResultadoDeInterpretacion
+import yunkil.ia.RevisionDePlan
+import yunkil.ia.RevisorDeGeometria
+import yunkil.ia.Vocabulario
+import yunkil.ia.contextoParaModelo
+import yunkil.ia.EjeNombrado
+import yunkil.ia.cotasEnMundoDe
+import yunkil.ia.transformDelPadreDe
 import yunkil.kernel.Axis
+import yunkil.kernel.CampoDeMalla
 import yunkil.kernel.Esfera
+import yunkil.kernel.Perfil2D
+import yunkil.kernel.Punto2
 import yunkil.kernel.Quat
 import yunkil.kernel.SdfNode
 import yunkil.kernel.Transform
@@ -10,8 +47,15 @@ import yunkil.kernel.Transformado
 import yunkil.kernel.Vec3
 import yunkil.kernel.empaquetarUniforms
 import yunkil.malla.Certificado
+import yunkil.malla.LectorStl
+import yunkil.malla.leerArchivo
+import yunkil.malla.anadirLinea
 import yunkil.malla.Exportador
 import yunkil.msl.MslGenerator
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.acos
+import kotlin.math.max
 
 /**
  * Una fila del árbol tal y como la pinta la interfaz. Es una vista aplanada y
@@ -29,6 +73,21 @@ data class FilaArbol(
     val admiteHijos: Boolean,
     val numeroDeHijos: Int,
 )
+
+/**
+ * Un plan del modelo ya leído: o hay plan, o hay un motivo concreto por el que no.
+ * Los avisos recogen lo que hubo que normalizar, para que la tolerancia sea visible.
+ */
+data class PlanInterpretado(
+    val plan: PlanDeModelado?,
+    val motivoDelRechazo: String?,
+    val avisos: List<String>,
+) {
+    val aceptado: Boolean get() = plan != null
+    val numeroDeOperaciones: Int get() = plan?.operaciones?.size ?: 0
+    val resumen: String get() = plan?.resumen.orEmpty()
+    val reemplaza: Boolean get() = plan?.reemplazar ?: false
+}
 
 /** Un parámetro listo para pintar un control, con sus límites ya resueltos. */
 data class ParametroVisible(
@@ -52,11 +111,17 @@ data class ParametroVisible(
 class Editor(inicial: Documento = Documento.vacio()) {
 
     private var documento: Documento = inicial
+
+    /** El documento vivo, para la reproducción del historial. */
+    internal val documentoActual: Documento get() = documento
     private val historial = ArrayDeque<Documento>()
     private val rehechos = ArrayDeque<Documento>()
 
     private val generador = MslGenerator()
     private var shaderActual = generador.generar(compilarSeguro(inicial))
+
+    /** Mientras está abierta, las ediciones no anotan puntos de deshacer propios. */
+    private var enTransaccion = false
 
     /** Motivo del último rechazo, o `null` si el último cambio se aplicó. */
     var ultimoError: String? = null
@@ -67,6 +132,14 @@ class Editor(inicial: Documento = Documento.vacio()) {
     val fuenteMsl: String get() = shaderActual.fuente
     val huellaTopologica: String get() = shaderActual.huellaTopologica
     val numeroDeUniforms: Int get() = shaderActual.numeroDeUniforms
+
+    /**
+     * Fracción de la distancia que el trazado puede avanzar sin pasarse de largo.
+     *
+     * Vale 1 mientras el árbol sea 1-Lipschitz, que es lo normal; baja cuando hay filetes
+     * locales. Lo decide el generador porque es quien sabe qué nodos hay.
+     */
+    val pasoSeguroDelShader: Float get() = shaderActual.pasoSeguro
     val seleccionado: String? get() = documento.seleccionado
     val puedeDeshacer: Boolean get() = historial.isNotEmpty()
     val puedeRehacer: Boolean get() = rehechos.isNotEmpty()
@@ -90,7 +163,7 @@ class Editor(inicial: Documento = Documento.vacio()) {
 
     fun parametrosDe(id: String): List<ParametroVisible> {
         val pieza = documento.buscar(id) ?: return emptyList()
-        return pieza.tipo.parametros.map {
+        return pieza.tipo.parametrosCon(pieza.forma).map {
             ParametroVisible(
                 clave = it.clave,
                 etiqueta = it.etiqueta,
@@ -123,6 +196,19 @@ class Editor(inicial: Documento = Documento.vacio()) {
         val c = nodo.cotas()
         return listOf(c.min.x, c.min.y, c.min.z) to listOf(c.max.x, c.max.y, c.max.z)
     }
+
+    /**
+     * Qué pieza hay en la dirección de un rayo, y dónde.
+     *
+     * Es lo que faltaba para poder pinchar en el viewport en vez de teclear números.
+     * La interfaz pasa el rayo que sale del cursor y recibe la pieza; quien decide es
+     * el núcleo, con el mismo campo que exporta y analiza.
+     */
+    fun senalar(ox: Float, oy: Float, oz: Float, dx: Float, dy: Float, dz: Float): Impacto? =
+        documento.impactar(Vec3(ox, oy, oz), Vec3(dx, dy, dz))
+
+    /** De qué pieza es la superficie que pasa por un punto del mundo. */
+    fun atribuir(x: Float, y: Float, z: Float): String? = documento.atribuir(Vec3(x, y, z))
 
     // ------------------------------------------------------------------ edición
 
@@ -168,9 +254,36 @@ class Editor(inicial: Documento = Documento.vacio()) {
         }
     }
 
+    /** Duplica una pieza completa junto con sus hijos y selecciona la copia. */
+    fun duplicar(id: String): Boolean {
+        if (id == documento.raiz.id) return rechazar("La raíz del documento no se puede duplicar")
+        val original = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        val padre = documento.padreDe(id) ?: return rechazar("No existe el padre de la pieza")
+
+        fun copiar(pieza: Pieza): Pieza {
+            val nueva = Pieza.nueva(pieza.tipo, "${pieza.nombre} copia")
+            return pieza.copy(
+                id = nueva.id,
+                nombre = nueva.nombre,
+                hijos = pieza.hijos.map(::copiar),
+            )
+        }
+
+        val copia = copiar(original)
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(padre) { p ->
+                    val posicion = p.hijos.indexOfFirst { it.id == id } + 1
+                    p.copy(hijos = p.hijos.toMutableList().apply { add(posicion, copia) })
+                },
+                seleccionado = copia.id,
+            )
+        }
+    }
+
     fun fijarParametro(id: String, clave: String, valor: Float): Boolean {
         val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
-        val definicion = pieza.tipo.parametros.firstOrNull { it.clave == clave }
+        val definicion = pieza.tipo.parametrosCon(pieza.forma).firstOrNull { it.clave == clave }
             ?: return rechazar("«$clave» no es un parámetro de ${pieza.tipo.etiqueta}")
 
         // Se recorta en lugar de rechazar: un deslizador nunca debe poder atascarse.
@@ -180,11 +293,719 @@ class Editor(inicial: Documento = Documento.vacio()) {
         }
     }
 
+    val raizId: String get() = documento.raiz.id
+
+    /** Las caras de las que se puede tirar en esta pieza. */
+    fun asasDe(id: String): List<String> =
+        documento.buscar(id)?.tipo?.asas?.keys?.map { it.name } ?: emptyList()
+
+    /**
+     * Qué cara de la pieza corresponde a una normal del mundo.
+     *
+     * La interfaz tiene el punto y la normal del impacto, no el nombre de una cara. Aquí
+     * se pasa la normal al espacio local de la pieza y se elige el asa que le
+     * corresponde, que es una decisión geométrica y por tanto del núcleo.
+     */
+    fun asaParaNormal(id: String, nx: Float, ny: Float, nz: Float): String? {
+        val pieza = documento.buscar(id) ?: return null
+        val asas = pieza.tipo.asas.keys
+        if (asas.isEmpty()) return null
+
+        // Solo la rotación: la normal es una dirección, así que la traslación no cuenta
+        // y la escala uniforme no la cambia.
+        val acumulado = documento.transformDelPadreDe(id)?.componer(pieza.transform) ?: pieza.transform
+        val enMundo = Vec3(nx, ny, nz)
+        val local = acumulado.worldToLocal(enMundo) - acumulado.worldToLocal(Vec3.ZERO)
+        val largo = local.length()
+        if (largo < 1e-6f) return null
+
+        return Asa.masParecidaA(local / largo, asas)?.name
+    }
+
+    /**
+     * Empuja una cara hacia fuera [milimetros] milímetros del mundo.
+     *
+     * Con esto arrastrar una cara hace lo que espera cualquiera que venga de Shapr3D, y
+     * **sigue siendo un parámetro con su número**: la cota no se pierde por haberla
+     * movido con el ratón.
+     *
+     * Dos cosas que no son obvias y sin las cuales el gesto se siente roto:
+     *
+     * - **La compensación del centro.** Las primitivas están centradas, así que crecer
+     *   10 mm mueve las dos caras 5. Se desplaza el centro medio crecimiento en la
+     *   dirección de la cara para que la de enfrente se quede donde está.
+     * - **Se compensa lo conseguido, no lo pedido.** Si el parámetro topa con su
+     *   máximo, compensar el arrastre entero movería la pieza sin que creciera y la cara
+     *   que se estaba sujetando se despegaría.
+     */
+    fun empujar(
+        id: String,
+        asaNombre: String,
+        milimetros: Float,
+        registrarEnHistorial: Boolean = true,
+    ): Boolean {
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        val asa = Asa.entries.firstOrNull { it.name == asaNombre }
+            ?: return rechazar("«$asaNombre» no es una cara")
+        val clave = pieza.tipo.asas[asa]
+            ?: return rechazar("${pieza.tipo.etiqueta} no tiene ${asa.etiqueta} que empujar")
+        if (!milimetros.isFinite()) return rechazar("El arrastre no es válido")
+
+        val definicion = pieza.tipo.parametrosCon(pieza.forma).firstOrNull { it.clave == clave }
+            ?: return rechazar("«$clave» no es un parámetro de ${pieza.tipo.etiqueta}")
+
+        // El arrastre viene en milímetros del mundo y el parámetro vive en los del
+        // espacio local de la pieza, que la cadena de escalas separa.
+        val escala = documento.raiz.escalaHasta(id) ?: 1f
+        val antes = pieza.parametro(clave)
+        val despues = (antes + milimetros / escala).coerceIn(definicion.minimo, definicion.maximo)
+        val crecimiento = despues - antes
+        if (crecimiento == 0f) return true
+
+        // Un radio crece a los dos lados a la vez: no hay centro que compensar.
+        val desplazamiento = if (asa == Asa.CONTORNO) Vec3.ZERO else {
+            val local = asa.haciaFuera * (crecimiento * 0.5f)
+            pieza.transform.localToWorld(local) - pieza.transform.localToWorld(Vec3.ZERO)
+        }
+
+        // Durante un arrastre no se anota historial en cada fotograma: el punto de
+        // deshacer se marca al empezar, igual que con los deslizadores.
+        return aplicar(registrarEnHistorial = registrarEnHistorial) { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(id) {
+                    it.copy(
+                        parametros = it.parametros + (clave to despues),
+                        transform = it.transform.copy(
+                            translation = it.transform.translation + desplazamiento,
+                        ),
+                    )
+                },
+            )
+        }
+    }
+
+    /**
+     * Pone un filete en el punto señalado.
+     *
+     * Un filete no vive en la pieza sino en el **encuentro entre dos**, así que la
+     * operación sube desde [id] hasta el primer booleano que tenga dos hijos o más: es
+     * lo que hace que baste pinchar el canto sin saber dónde está el nodo que lo produce.
+     *
+     * El centro llega en coordenadas del mundo porque es el punto de impacto del cursor,
+     * y ahí es donde el usuario ha dicho «este canto».
+     */
+    fun filetear(id: String, x: Float, y: Float, z: Float, radio: Float, tamano: Float): Boolean {
+        if (!x.isFinite() || !y.isFinite() || !z.isFinite() || !radio.isFinite() || !tamano.isFinite()) {
+            return rechazar("El filete no es válido")
+        }
+        if (radio <= 0f) return rechazar("El alcance del filete tiene que ser mayor que cero")
+
+        val booleano = booleanoQueJunta(id)
+            ?: return rechazar("Aquí no se juntan dos piezas: no hay canto que filetear")
+
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(booleano) {
+                    it.copy(
+                        parametros = it.parametros + mapOf(
+                            "acuerdoRadio" to radio,
+                            "acuerdoX" to x,
+                            "acuerdoY" to y,
+                            "acuerdoZ" to z,
+                            "fusion" to tamano.coerceAtMost(radio),
+                        ),
+                    )
+                },
+                seleccionado = booleano,
+            )
+        }
+    }
+
+    /**
+     * Redondea el canto donde se juntan dos piezas, sin que nadie tenga que señalarlo.
+     *
+     * Es la puerta para la IA, que no tiene cursor: el canto se nombra por las dos piezas
+     * que lo producen y **el punto lo mide Yunkil**, intersecando sus cajas envolventes en
+     * el mundo. Que el modelo se invente una coordenada del espacio es justo el fallo que
+     * se quiere evitar; que diga «el encuentro de la base y el respaldo» lo hace bien.
+     *
+     * Con [contraId] nulo se redondean todos los encuentros de ese booleano, que es el
+     * `fusion` de siempre: para una figura orgánica es lo correcto.
+     */
+    fun filetearEntre(objetivoId: String, contraId: String?, radio: Float): Boolean {
+        if (!radio.isFinite() || radio <= 0f) return rechazar("El radio del filete tiene que ser positivo")
+        val booleano = booleanoQueJunta(objetivoId)
+            ?: return rechazar("Aquí no se juntan dos piezas: no hay canto que filetear")
+
+        if (contraId == null) {
+            // Todos los encuentros de ese booleano: es el acuerdo global.
+            return aplicar { doc ->
+                doc.copy(
+                    raiz = doc.raiz.mapear(booleano) {
+                        it.copy(parametros = it.parametros + mapOf("fusion" to radio, "acuerdoRadio" to 0f))
+                    },
+                    seleccionado = booleano,
+                )
+            }
+        }
+
+        val unas = documento.cotasEnMundoDe(objetivoId)
+            ?: return rechazar("No se pueden medir las cotas de $objetivoId")
+        val otras = documento.cotasEnMundoDe(contraId)
+            ?: return rechazar("No se pueden medir las cotas de $contraId")
+
+        // Donde se solapan las dos envolventes está el canto. Si no se solapan, las piezas
+        // se tocan justo o no se tocan: el punto medio entre sus centros es lo más cercano
+        // al encuentro que se puede decir sin inventar nada.
+        val comun = unas.intersect(otras)
+        val seSolapan = comun.max.x >= comun.min.x && comun.max.y >= comun.min.y && comun.max.z >= comun.min.z
+        val centro = if (seSolapan) comun.center else (unas.center + otras.center) * 0.5f
+
+        // El alcance cubre el canto entero: la diagonal de la zona común cuando la hay, y
+        // si no, dos radios, que es lo que ocupa el redondeo.
+        val alcance = if (seSolapan) max(comun.radius, radio * 2f) else radio * 2f
+
+        return filetear(booleano, centro.x, centro.y, centro.z, alcance, radio)
+    }
+
+    /**
+     * Gira una pieza para que la cara nombrada quede contra el plato.
+     *
+     * Es la misma operación que `apoyarEnElPlato`, pero por nombre de cara en vez de por
+     * normal del cursor: un modelo de lenguaje sabe perfectamente cuál es la cara plana
+     * grande de lo que acaba de diseñar, y no sabría escribir el cuaternión que la tumba.
+     */
+    fun apoyarCaraEnElPlato(id: String, asaNombre: String): Boolean {
+        val asa = Asa.entries.firstOrNull { it.name == asaNombre }
+            ?: return rechazar("«$asaNombre» no es una cara")
+        if (asa == Asa.CONTORNO) return rechazar("El contorno no es una cara que se pueda apoyar")
+
+        val enMundo = direccionEnElMundo(id, asa.haciaFuera.x, asa.haciaFuera.y, asa.haciaFuera.z)
+            ?: return rechazar("No se puede saber a dónde mira esa cara")
+        return apoyarEnElPlato(id, enMundo[0], enMundo[1], enMundo[2])
+    }
+
+    /** Quita el filete local de un booleano y devuelve la booleana exacta. */
+    fun quitarFilete(id: String): Boolean {
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        if (pieza.tipo !in BOOLEANAS) return rechazar("«${pieza.nombre}» no es una operación booleana")
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(id) {
+                    it.copy(parametros = it.parametros + ("acuerdoRadio" to 0f))
+                },
+            )
+        }
+    }
+
+    /** ¿Lleva esta pieza un filete local puesto? */
+    fun tieneFilete(id: String): Boolean = (documento.buscar(id)?.parametro("acuerdoRadio") ?: 0f) > 0f
+
+    /**
+     * El booleano más cercano por encima de [id] que de verdad junte dos cosas.
+     *
+     * Una unión con un solo hijo no produce ningún canto —compila al hijo tal cual—, así
+     * que filetearla no haría nada visible y sería un fallo silencioso.
+     */
+    private fun booleanoQueJunta(id: String): String? {
+        var actual: String? = id
+        while (actual != null) {
+            val pieza = documento.buscar(actual)
+            if (pieza != null && pieza.tipo in BOOLEANAS && pieza.hijos.count { it.visible } >= 2) {
+                return actual
+            }
+            actual = documento.padreDe(actual)
+        }
+        return null
+    }
+
+    // ------------------------------------------------- ver, mover, copiar, apoyar
+
+    fun padreDe(id: String): String? = documento.padreDe(id)
+
+    /** Centro de la caja envolvente de una pieza, en milímetros del mundo. */
+    fun centroEnElMundo(id: String): List<Float>? {
+        val c = documento.cotasEnMundoDe(id) ?: return null
+        return listOf(c.center.x, c.center.y, c.center.z)
+    }
+
+    /** A dónde apunta, en el mundo, una dirección del espacio local de la pieza. */
+    fun direccionEnElMundo(id: String, x: Float, y: Float, z: Float): List<Float>? {
+        val pieza = documento.buscar(id) ?: return null
+        val acumulado = documento.transformDelPadreDe(id)?.componer(pieza.transform) ?: pieza.transform
+        val v = acumulado.localToWorld(Vec3(x, y, z)) - acumulado.localToWorld(Vec3.ZERO)
+        val largo = v.length()
+        if (largo < 1e-6f) return null
+        val n = v / largo
+        return listOf(n.x, n.y, n.z)
+    }
+
+    /**
+     * Deja visible solo esta pieza y lo que hace falta para verla.
+     *
+     * Los ancestros se quedan visibles porque una rama oculta no compila: aislar una caja
+     * dentro de un grupo escondiendo el grupo dejaría la pantalla en negro. Es la operación
+     * que uno busca en cuanto el árbol pasa de cinco piezas.
+     */
+    fun aislar(id: String): Boolean {
+        if (documento.buscar(id) == null) return rechazar("No existe la pieza $id")
+
+        val aLaVista = HashSet<String>()
+        aLaVista.add(id)
+        var subiendo = documento.padreDe(id)
+        while (subiendo != null) {
+            aLaVista.add(subiendo)
+            subiendo = documento.padreDe(subiendo)
+        }
+        // Y su descendencia: aislar un grupo tiene que enseñar el grupo entero.
+        documento.buscar(id)?.aplanar()?.forEach { (pieza, _) -> aLaVista.add(pieza.id) }
+
+        return aplicar { doc ->
+            doc.copy(raiz = doc.raiz.conVisibilidad { pieza -> pieza.id in aLaVista }, seleccionado = id)
+        }
+    }
+
+    /** Devuelve la visibilidad a todo el documento. */
+    fun mostrarTodo(): Boolean = aplicar { doc ->
+        doc.copy(raiz = doc.raiz.conVisibilidad { true })
+    }
+
+    /**
+     * Saca una pieza de su grupo y la deja colgando del abuelo.
+     *
+     * **Conservando su sitio en el mundo**, que es lo que hace que la operación sirva de
+     * algo: si al salir de un grupo desplazado la pieza saltara a otro lado habría que
+     * recolocarla a mano y no se habría ganado nada. La transformación del padre se
+     * compone en la de la pieza antes de moverla.
+     */
+    fun extraer(id: String): Boolean {
+        if (id == documento.raiz.id) return rechazar("La raíz no se puede extraer")
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        val padre = documento.padreDe(id) ?: return rechazar("No existe el padre de la pieza")
+        val abuelo = documento.padreDe(padre)
+            ?: return rechazar("«${pieza.nombre}» ya cuelga de la raíz")
+
+        val transformDelPadre = documento.buscar(padre)?.transform ?: Transform.IDENTITY
+        val reubicada = pieza.copy(transform = transformDelPadre.componer(pieza.transform))
+
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz
+                    .mapear(padre) { p -> p.copy(hijos = p.hijos.filter { it.id != id }) }
+                    .mapear(abuelo) { a -> a.copy(hijos = a.hijos + reubicada) },
+                seleccionado = id,
+            )
+        }
+    }
+
+    /** La pieza como texto, para llevarla al portapapeles. */
+    fun copiar(id: String): String? {
+        val pieza = documento.buscar(id)
+        if (pieza == null) {
+            ultimoError = "No existe la pieza $id"
+            return null
+        }
+        ultimoError = null
+        return formato.encodeToString(Pieza.serializer(), pieza)
+    }
+
+    /**
+     * Pega una pieza copiada dentro de [destinoId].
+     *
+     * Todos los identificadores del árbol pegado se renuevan. Conservarlos dejaría dos
+     * piezas con el mismo id en el documento y cualquier operación posterior tocaría la
+     * equivocada, que es la clase de fallo que aparece media hora después y no se
+     * relaciona con haber pegado.
+     */
+    fun pegar(texto: String, destinoId: String?): Boolean {
+        val leida = try {
+            formato.decodeFromString(Pieza.serializer(), texto)
+        } catch (e: Exception) {
+            return rechazar("Eso no es una pieza de Yunkil")
+        }
+
+        fun renovar(pieza: Pieza): Pieza {
+            val nueva = Pieza.nueva(pieza.tipo, pieza.nombre)
+            return pieza.copy(id = nueva.id, hijos = pieza.hijos.map(::renovar))
+        }
+
+        val copia = renovar(leida)
+        val destino = destinoValidoPara(destinoId ?: documento.raiz.id)
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(destino) { it.copy(hijos = it.hijos + copia) },
+                seleccionado = copia.id,
+            )
+        }
+    }
+
+    /**
+     * Gira la pieza para que la cara señalada quede apoyada en el plato.
+     *
+     * Es la interacción de modelado para impresión que más se echa de menos: se pincha la
+     * cara que se quiere abajo y la pieza se orienta. Además se baja al plato, porque una
+     * pieza apoyada pero flotando a 60 mm no está apoyada en nada.
+     *
+     * La normal llega en coordenadas del mundo porque es la del impacto del cursor.
+     */
+    fun apoyarEnElPlato(id: String, nx: Float, ny: Float, nz: Float): Boolean {
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        val n = Vec3(nx, ny, nz)
+        val largo = n.length()
+        if (largo < 1e-6f || !largo.isFinite()) return rechazar("Esa cara no tiene una dirección clara")
+        val desde = n / largo
+        val hacia = Vec3(0f, -1f, 0f)
+
+        val giro = rotacionQueLleva(desde, hacia)
+        val girada = aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(id) {
+                    it.copy(transform = it.transform.copy(rotation = (giro * it.transform.rotation).normalized()))
+                },
+                seleccionado = id,
+            )
+        }
+
+        // Y al plato. Se hace dentro de la misma transacción para que sea un solo ⌘Z.
+        val cotas = documento.cotasEnMundoDe(id)
+        if (cotas != null && abs(cotas.min.y) > 1e-4f) {
+            val bajada = aplicar(registrarEnHistorial = false) { doc ->
+                doc.copy(
+                    raiz = doc.raiz.mapear(id) {
+                        it.copy(
+                            transform = it.transform.copy(
+                                translation = it.transform.translation - Vec3(0f, cotas.min.y, 0f),
+                            ),
+                        )
+                    },
+                )
+            }
+            return girada || bajada
+        }
+        return girada
+    }
+
+    /**
+     * El giro más corto que lleva [desde] a [hacia].
+     *
+     * El caso de los vectores opuestos hay que tratarlo aparte: el producto vectorial sale
+     * cero y no hay eje que sacar de ahí, así que se elige cualquier perpendicular. Sin
+     * esta rama, apoyar la cara de arriba —que es lo más natural que se puede pedir— daría
+     * un cuaternión con ceros y no giraría nada.
+     */
+    private fun rotacionQueLleva(desde: Vec3, hacia: Vec3): Quat {
+        val coseno = desde.x * hacia.x + desde.y * hacia.y + desde.z * hacia.z
+        if (coseno > 0.9999f) return Quat.IDENTITY
+        if (coseno < -0.9999f) {
+            val perpendicular = if (abs(desde.x) < 0.9f) Vec3(1f, 0f, 0f) else Vec3(0f, 1f, 0f)
+            val eje = cruz(desde, perpendicular)
+            return Quat.fromAxisAngle(eje, PI.toFloat())
+        }
+        val eje = cruz(desde, hacia)
+        return Quat.fromAxisAngle(eje, acos(coseno.coerceIn(-1f, 1f)))
+    }
+
+    private fun cruz(a: Vec3, b: Vec3) = Vec3(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x,
+    )
+
     /** Cierra un arrastre de deslizador: marca un único punto de deshacer. */
     fun confirmarEdicionContinua() {
         historial.addLast(documento)
         recortarHistorial()
         rehechos.clear()
+    }
+
+    fun existe(id: String): Boolean = documento.buscar(id) != null
+
+    /**
+     * La pieza que se llama así, si no hay dos que se llamen igual.
+     *
+     * Los identificadores son internos y cambian en cada aplicación de un plan; los
+     * nombres son lo que se ve, lo que escribe el modelo en `nombre` y lo que le
+     * devuelve el revisor en sus avisos. Exigir el alias convertía una receta
+     * correcta —«coloca la Tapa sobre la Base»— en una operación omitida.
+     *
+     * Con dos piezas del mismo nombre no se elige ninguna: adivinar cuál de las dos
+     * quería el modelo es exactamente el tipo de suposición que produce piezas mal
+     * montadas sin que nadie se entere.
+     */
+    fun idPorNombre(nombre: String): String? {
+        val buscado = nombre.trim().lowercase()
+        val encontradas = ArrayList<String>()
+        fun visitar(pieza: Pieza) {
+            if (pieza.nombre.trim().lowercase() == buscado) encontradas.add(pieza.id)
+            pieza.hijos.forEach(::visitar)
+        }
+        visitar(documento.raiz)
+        return encontradas.singleOrNull()
+    }
+
+    // ------------------------------------------------------------------ perfiles
+
+    fun formasDePerfil(): List<String> = FormaDePerfil.entries.map { it.name }
+
+    fun formaDe(id: String): String =
+        documento.buscar(id)?.forma?.name ?: FormaDePerfil.RECTANGULO.name
+
+    fun tienePerfil(id: String): Boolean {
+        val tipo = documento.buscar(id)?.tipo ?: return false
+        return tipo == TipoPieza.EXTRUSION || tipo == TipoPieza.REVOLUCION ||
+            tipo == TipoPieza.BARRIDO
+    }
+
+    /**
+     * Trae un STL de fuera y lo deja como una pieza más del árbol.
+     *
+     * Es el punto por el que entra la geometría que no se puede escribir. A partir de
+     * aquí la malla deja de ser especial: se le resta, se ahueca, se taladra, se acota
+     * y se exporta por la misma cadena verificada que todo lo demás.
+     *
+     * Se comprueba la topología antes de hornear y **se avisa sin bloquear**. El signo
+     * del campo sale de contar cruces, y eso da por supuesto que la superficie cierra;
+     * con agujeros el resultado es poco fiable. Pero negarse dejaría fuera la mitad de
+     * lo que circula por internet, así que se importa y se dice.
+     */
+    fun importarMalla(ruta: String, resolucion: Float = 0f, padreId: String? = null): Boolean {
+        val bytes = leerArchivo(ruta) ?: return rechazar("No se pudo leer $ruta")
+
+        val leido = LectorStl.leer(bytes)
+        if (leido is LectorStl.Resultado.Fallo) return rechazar("No es un STL válido: ${leido.motivo}")
+        val malla = (leido as LectorStl.Resultado.Leida).malla
+        if (malla.numeroDeTriangulos == 0) return rechazar("El archivo no trae ningún triángulo")
+
+        val topologia = malla.revisarTopologia()
+        val aviso = if (topologia.esCerrada) null else
+            "la malla trae ${topologia.aristasAbiertas} aristas abiertas; el interior puede salir mal"
+
+        // Resolución por omisión: el lado mayor entre 120. Es fino para ver la forma y
+        // no dispara ni la memoria ni la espera.
+        val tamano = malla.cotas().size
+        val mayor = maxOf(tamano.x, maxOf(tamano.y, tamano.z))
+        val paso = if (resolucion > 0f) resolucion else maxOf(mayor / 120f, 0.05f)
+
+        val campo = try {
+            CampoDeMalla.hornear(malla.vertices, malla.triangulos, paso, origen = ruta)
+        } catch (e: Throwable) {
+            return rechazar("No se pudo hornear la malla: ${e.message}")
+        }
+
+        val nombre = ruta.substringAfterLast('/').substringBeforeLast('.').ifBlank { "Malla" }
+        val nueva = Pieza.nueva(TipoPieza.MALLA).copy(
+            nombre = nombre,
+            rutaDeMalla = ruta,
+            campoDeMalla = campo,
+        )
+        val destino = destinoValidoPara(padreId ?: documento.raiz.id)
+
+        val aplicado = aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(destino) { it.copy(hijos = it.hijos + nueva) },
+                seleccionado = nueva.id,
+            )
+        }
+        // El aviso viaja por `ultimoError` a propósito: la pieza ya está puesta, pero
+        // quien la mire tiene que enterarse de que su interior es una suposición.
+        if (aplicado && aviso != null) ultimoError = aviso
+        return aplicado
+    }
+
+    /**
+     * Vuelve a hornear las mallas de un documento recién abierto.
+     *
+     * El campo no se guarda en el archivo, así que al abrir llega a nulo y la pieza
+     * compilaría a nada. Devuelve las que no se pudieron recuperar, para poder decir
+     * cuáles y no dejar huecos silenciosos en el árbol.
+     */
+    fun rehornearMallas(): List<String> {
+        val perdidas = ArrayList<String>()
+        fun recorrer(pieza: Pieza): Pieza {
+            var actualizada = pieza
+            if (pieza.tipo == TipoPieza.MALLA && pieza.campoDeMalla == null) {
+                val ruta = pieza.rutaDeMalla
+                val bytes = ruta?.let { leerArchivo(it) }
+                val leido = bytes?.let { LectorStl.leer(it) }
+                if (leido is LectorStl.Resultado.Leida && leido.malla.numeroDeTriangulos > 0) {
+                    val tamano = leido.malla.cotas().size
+                    val mayor = maxOf(tamano.x, maxOf(tamano.y, tamano.z))
+                    actualizada = pieza.copy(
+                        campoDeMalla = CampoDeMalla.hornear(
+                            leido.malla.vertices, leido.malla.triangulos,
+                            maxOf(mayor / 120f, 0.05f), origen = ruta,
+                        ),
+                    )
+                } else {
+                    perdidas.add(pieza.nombre)
+                }
+            }
+            return actualizada.copy(hijos = actualizada.hijos.map(::recorrer))
+        }
+
+        // Se pasa por `aplicar` sin registrar en el historial: rehornear no es una
+        // edición que nadie quiera deshacer, pero sí tiene que recompilar el shader.
+        val nuevaRaiz = recorrer(documento.raiz)
+        aplicar(registrarEnHistorial = false) { it.copy(raiz = nuevaRaiz) }
+        return perdidas
+    }
+
+    /**
+     * Taladra una pieza con un patrón de montaje normalizado.
+     *
+     * Es la diferencia entre «se parece» y «encaja». Un soporte de rack con los
+     * agujeros a la separación equivocada no es un soporte peor: no entra. Aquí el
+     * modelo dice `RACK_19` con sus unidades y el núcleo pone los agujeros donde los
+     * pone la norma, con la rosca que espera y la holgura de esta impresora.
+     *
+     * Cada agujero se abre sobre lo que dejó el anterior: tras el primer taladro la
+     * pieza ya es una DIFERENCIA, y seguir apuntando a la original dejaría los
+     * agujeros colgando fuera del árbol.
+     */
+    fun aplicarPatron(
+        objetivoId: String,
+        estandar: String,
+        unidades: Int = 1,
+        ejeNombre: String = "Y",
+        ajusteNombre: String = AjusteDeTaladro.PASANTE.name,
+        nombrePerfil: String? = null,
+    ): Boolean {
+        val patron = Estandares.porNombre(estandar, unidades)
+            ?: return rechazar(
+                "Patrón de montaje desconocido: $estandar. Los que hay son ${Estandares.designaciones}",
+            )
+        if (patron.puntos.isEmpty()) return rechazar("El patrón $estandar no tiene agujeros")
+
+        val abierta = enTransaccion
+        if (!abierta) abrirTransaccion()
+
+        var destino = objetivoId
+        for (punto in patron.puntos) {
+            taladrar(
+                objetivoId = destino,
+                designacion = patron.rosca,
+                ajusteNombre = ajusteNombre,
+                ejeNombre = ejeNombre,
+                desplazamientoA = punto.x,
+                desplazamientoB = punto.y,
+                nombrePerfil = nombrePerfil,
+            )
+            ultimoError?.let {
+                if (!abierta) revertirTransaccion(historial.lastOrNull() ?: documento)
+                return rechazar("no se pudo abrir el patrón $estandar: $it")
+            }
+            destino = seleccionado ?: destino
+        }
+
+        if (!abierta) cerrarTransaccion()
+        return true
+    }
+
+    /**
+     * El contorno de la pieza, o el de la primera descendiente que tenga uno.
+     *
+     * Hace falta descender porque el segundo taladro de una pieza no apunta ya a la
+     * extrusión sino a la DIFERENCIA que la envolvió al abrir el primer agujero. Sin
+     * esto, «dos agujeros con punto de contorno» funcionaría en el primero y fallaría
+     * en el segundo, que es la peor forma posible de fallar.
+     */
+    private fun perfilDelSubarbol(pieza: Pieza): Perfil2D? {
+        if (tienePerfil(pieza.id)) return pieza.perfil()
+        for (hijo in pieza.hijos) perfilDelSubarbol(hijo)?.let { return it }
+        return null
+    }
+
+    /** Desviación del contorno teselado respecto a la curva ideal, en milímetros. */
+    fun desviacionDelPerfil(id: String): Float =
+        documento.buscar(id)?.takeIf { tienePerfil(id) }?.perfil()?.desviacionMaxima ?: 0f
+
+    fun areaDelPerfil(id: String): Float =
+        documento.buscar(id)?.takeIf { tienePerfil(id) }?.perfil()?.area() ?: 0f
+
+    /** Contorno aplanado en pares (x, y), para que la interfaz lo pueda dibujar. */
+    fun contornoDe(id: String): List<Float> {
+        val pieza = documento.buscar(id) ?: return emptyList()
+        if (!tienePerfil(id)) return emptyList()
+        return pieza.perfil().poligono.flatMap { listOf(it.x, it.y) }
+    }
+
+    /**
+     * Cambia la familia del contorno.
+     *
+     * Los parámetros de la forma nueva se siembran con sus valores por defecto,
+     * pero **se conservan los que ya existían con el mismo nombre**: pasar de
+     * rectángulo a ranura mantiene el ancho que el usuario ya había acotado en vez
+     * de tirarlo, que es lo que espera cualquiera al probar formas.
+     */
+    fun fijarForma(id: String, nombreDeForma: String): Boolean {
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        if (!tienePerfil(id)) return rechazar("«${pieza.tipo.etiqueta}» no se construye con un perfil")
+        val forma = FormaDePerfil.entries.firstOrNull { it.name == nombreDeForma.uppercase() }
+            ?: return rechazar("Forma de perfil desconocida: $nombreDeForma")
+
+        val defectos = pieza.tipo.parametrosCon(forma).associate { it.clave to it.defecto }
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(id) {
+                    it.copy(forma = forma, parametros = defectos + it.parametros)
+                },
+            )
+        }
+    }
+
+    /** Contorno libre a partir de pares (x, y) en milímetros. */
+    fun fijarPuntosDelPerfil(id: String, coordenadas: List<Float>): Boolean {
+        if (!tienePerfil(id)) return rechazar("Esa pieza no se construye con un perfil")
+        if (coordenadas.size < 6 || coordenadas.size % 2 != 0) {
+            return rechazar("Un contorno necesita al menos tres puntos en pares (x, y)")
+        }
+        if (coordenadas.any { !it.isFinite() || abs(it) > 10_000f }) {
+            return rechazar("Alguna coordenada del contorno no es un número válido")
+        }
+        val puntos = coordenadas.chunked(2).map { Punto2(it[0], it[1]) }
+        val perfil = Perfil2D.poligono(puntos)
+        if (perfil.area() < 1e-4f) {
+            return rechazar("El contorno no encierra área: revisa que los puntos no estén alineados")
+        }
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(id) {
+                    it.copy(forma = FormaDePerfil.LIBRE, puntos = puntos)
+                },
+            )
+        }
+    }
+
+    val idDeLaRaiz: String get() = documento.raiz.id
+
+    // ------------------------------------------------------------------ transacciones
+
+    /**
+     * Abre un bloque de ediciones que se deshace de una sola vez.
+     *
+     * Un plan de treinta operaciones que dejara treinta puntos de deshacer sería
+     * inservible: el usuario pulsó una vez «aplicar» y espera poder pulsar una vez
+     * deshacer. Devuelve el documento previo para poder revertir si algo falla a
+     * mitad de camino.
+     */
+    fun abrirTransaccion(): Documento {
+        historial.addLast(documento)
+        recortarHistorial()
+        rehechos.clear()
+        enTransaccion = true
+        return documento
+    }
+
+    fun cerrarTransaccion() {
+        enTransaccion = false
+    }
+
+    /** Deshace la transacción entera y borra su punto de deshacer: nunca existió. */
+    fun revertirTransaccion(punto: Documento) {
+        enTransaccion = false
+        historial.removeLastOrNull()
+        documento = punto
+        regenerar()
     }
 
     fun fijarTransform(
@@ -270,6 +1091,452 @@ class Editor(inicial: Documento = Documento.vacio()) {
         }
     }
 
+    // ------------------------------------------------------------------ colocación
+
+    /**
+     * Desplaza una pieza sumando a lo que ya tenía, o fijando la posición si
+     * [absoluto]. Sumar es lo natural para un ajuste; fijar, para recolocar.
+     */
+    fun mover(id: String, x: Float, y: Float, z: Float, absoluto: Boolean = false): Boolean {
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return rechazar("La posición no es válida")
+        val destino = if (absoluto) Vec3(x, y, z) else pieza.transform.translation + Vec3(x, y, z)
+        return aplicar { doc ->
+            doc.copy(raiz = doc.raiz.mapear(id) { it.copy(transform = it.transform.copy(translation = destino)) })
+        }
+    }
+
+    /** Gira una pieza sobre su propio origen, acumulando o fijando el giro. */
+    fun girarPieza(id: String, x: Float, y: Float, z: Float, absoluto: Boolean = false): Boolean {
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return rechazar("El giro no es válido")
+        val giro = deEulerGrados(x, y, z)
+        val destino = if (absoluto) giro else (giro * pieza.transform.rotation).normalized()
+        return aplicar { doc ->
+            doc.copy(raiz = doc.raiz.mapear(id) { it.copy(transform = it.transform.copy(rotation = destino)) })
+        }
+    }
+
+    fun escalarPieza(id: String, factor: Float): Boolean {
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        if (!factor.isFinite() || factor <= 0f) return rechazar("La escala debe ser positiva")
+        val destino = (pieza.transform.scale * factor).coerceIn(1e-3f, 1e4f)
+        return aplicar { doc ->
+            doc.copy(raiz = doc.raiz.mapear(id) { it.copy(transform = it.transform.copy(scale = destino)) })
+        }
+    }
+
+    /**
+     * Escala una pieza —o el modelo entero— hasta que su cota en un eje mida lo pedido.
+     *
+     * Es la operación que convierte una proporción en una pieza real, y existe por un
+     * fallo concreto de los modelos de lenguaje: aciertan las proporciones y fallan
+     * los milímetros. Mirando una foto es peor todavía, porque en una imagen **no hay
+     * ninguna escala**: el mismo soporte puede ser de móvil o de camión.
+     *
+     * Pedirle al modelo que adivine cada cota es garantizar que se equivoque en todas.
+     * Con esto la persona dice la única medida que sí conoce —«esta pestaña son
+     * 40 mm»— y el resto del modelo la sigue en proporción. Se mide en el mundo, así
+     * que funciona igual sobre una primitiva suelta que sobre un conjunto entero.
+     */
+    fun escalarACota(id: String, eje: EjeNombrado, medida: Float): Boolean {
+        if (!medida.isFinite() || medida <= 0f) return rechazar("La medida debe ser positiva")
+        val cotas = documento.cotasEnMundoDe(id) ?: return rechazar("No se pueden medir las cotas de $id")
+        val actual = when (eje) {
+            EjeNombrado.X -> cotas.size.x
+            EjeNombrado.Y -> cotas.size.y
+            EjeNombrado.Z -> cotas.size.z
+        }
+        // Una pieza plana no se puede acotar por su eje plano: el factor sería
+        // infinito y saldría un sólido de tamaño arbitrario sin que nadie lo pidiera.
+        if (actual <= 1e-4f) {
+            return rechazar("La pieza no mide nada en $eje; elige otro eje para acotarla")
+        }
+        return escalarPieza(id, medida / actual)
+    }
+
+    /**
+     * Apoya una pieza contra una cara de otra, con holgura opcional.
+     *
+     * Resuelve las cotas reales de ambas en el mundo, así que funciona con piezas
+     * giradas, anidadas o escaladas. Es la operación que evita que quien monta el
+     * modelo —persona o modelo de lenguaje— tenga que hacer aritmética de semilados,
+     * que es exactamente donde se cometen los errores.
+     */
+    /**
+     * Abre un agujero para tornillo que **atraviesa** la pieza de lado a lado.
+     *
+     * Concentra tres cosas que, por separado, un modelo de lenguaje falla casi
+     * siempre. El diámetro sale de tabla y no de memoria. El largo se calcula desde
+     * las cotas reales de la pieza más un margen, así que la resta no puede quedarse
+     * corta —el fallo silencioso por excelencia: el plan es válido, la operación se
+     * aplica y no hay agujero—. Y la posición se da respecto al centro de la pieza,
+     * no en coordenadas del mundo.
+     *
+     * El cilindro entra como hermano de la pieza dentro de una `DIFERENCIA` nueva,
+     * de modo que ambos comparten el mismo espacio y las cotas locales del objetivo
+     * son directamente las coordenadas en las que hay que situarlo.
+     */
+    fun taladrar(
+        objetivoId: String,
+        designacion: String? = null,
+        diametro: Float = 0f,
+        ajusteNombre: String = AjusteDeTaladro.PASANTE.name,
+        ejeNombre: String = "Y",
+        desplazamientoA: Float = 0f,
+        desplazamientoB: Float = 0f,
+        /** Si `true`, (A, B) es un punto del contorno y no un desplazamiento. */
+        enCoordenadasDePerfil: Boolean = false,
+        nombrePerfil: String? = null,
+    ): Boolean {
+        if (objetivoId == documento.raiz.id) return rechazar("La raíz no se puede taladrar")
+        val pieza = documento.buscar(objetivoId) ?: return rechazar("No existe la pieza $objetivoId")
+        val cotas = pieza.compilar()?.cotas()
+            ?: return rechazar("«${pieza.nombre}» no tiene material que taladrar")
+
+        val ajuste = AjusteDeTaladro.entries.firstOrNull { it.name == ajusteNombre.uppercase() }
+            ?: return rechazar("Ajuste de taladro desconocido: $ajusteNombre")
+        val eje = Axis.entries.firstOrNull { it.name == ejeNombre.uppercase() }
+            ?: return rechazar("Eje desconocido: $ejeNombre")
+
+        val perfil = PerfilFabricacion.porNombre(nombrePerfil ?: "") ?: PerfilFabricacion.PREDETERMINADO
+        val calibre = when {
+            designacion != null -> {
+                val rosca = Roscas.porDesignacion(designacion)
+                    ?: return rechazar(
+                        "Rosca desconocida: $designacion. Las que hay son ${Roscas.designaciones}",
+                    )
+                Roscas.diametroPara(rosca, ajuste, perfil)
+            }
+
+            diametro > 0f -> diametro
+            else -> return rechazar("Hace falta una designación métrica o un diámetro")
+        }
+        if (!calibre.isFinite() || calibre <= 0f) return rechazar("El diámetro del taladro no es válido")
+        if (calibre < perfil.detalleMinimo) {
+            return rechazar(
+                "Un agujero de ${redondeado(calibre)} mm no llega a existir con una boquilla de " +
+                    "${redondeado(perfil.boquilla)} mm",
+            )
+        }
+
+        // Dos milímetros de sobrante por cada extremo: el corte tiene que salir por
+        // fuera de la cara, porque una resta que acaba justo en la superficie deja
+        // una película de material que el laminador convierte en un agujero ciego.
+        val largo = when (eje) {
+            Axis.X -> cotas.size.x
+            Axis.Y -> cotas.size.y
+            Axis.Z -> cotas.size.z
+        } + 4f
+
+        // Un punto del contorno se pasa a desplazamiento aquí, que es el único sitio
+        // donde se conoce el contorno. Se hace antes de calcular la posición porque a
+        // partir de ahí ya es un desplazamiento normal y corriente.
+        var a = desplazamientoA
+        var b = desplazamientoB
+        if (enCoordenadasDePerfil) {
+            if (eje != Axis.Y) {
+                return rechazar(
+                    "Un punto del contorno solo tiene sentido taladrando en Y, que es " +
+                        "la dirección en la que se levanta la extrusión",
+                )
+            }
+            val contorno = perfilDelSubarbol(pieza)
+                ?: return rechazar("«${pieza.nombre}» no tiene contorno; usa «desplazamiento»")
+            val (lo, hi) = contorno.cotas()
+            a = desplazamientoA - (lo.x + hi.x) * 0.5f
+            b = desplazamientoB - (lo.y + hi.y) * 0.5f
+        }
+
+        val centro = cotas.center
+        val posicion = when (eje) {
+            Axis.X -> Vec3(centro.x, centro.y + a, centro.z + b)
+            Axis.Y -> Vec3(centro.x + a, centro.y, centro.z + b)
+            Axis.Z -> Vec3(centro.x + a, centro.y + b, centro.z)
+        }
+        // El cilindro nace a lo largo de Y; para los otros ejes se tumba 90°.
+        val giro = when (eje) {
+            Axis.X -> Vec3(0f, 0f, 90f)
+            Axis.Y -> Vec3.ZERO
+            Axis.Z -> Vec3(90f, 0f, 0f)
+        }
+
+        val abierta = enTransaccion
+        if (!abierta) abrirTransaccion()
+
+        // Taladrar algo que ya es una diferencia añade la broca a la que hay, en vez
+        // de envolverla en otra. El sólido es el mismo —restar A y luego B es restar
+        // los dos— pero el árbol crece a lo ancho y no a lo hondo. Anidando, una
+        // pieza con seis agujeros salía con seis niveles de diferencia, ilegible para
+        // quien la edita a mano y cara en tokens para el modelo, que la recibe entera
+        // en cada vuelta de corrección.
+        val diferencia: String
+        if (pieza.tipo == TipoPieza.DIFERENCIA && pieza.hijos.isNotEmpty()) {
+            diferencia = objetivoId
+        } else {
+            // Se mira `ultimoError` y no lo que devuelven estas llamadas: su booleano
+            // significa «hay que recompilar el shader», no «salió bien». Una
+            // DIFERENCIA recién creada tiene un solo hijo y compila exactamente igual
+            // que él, así que envolver **acierta** y devuelve `false`. Leerlo como
+            // fallo abortaba el taladro dejando la diferencia vacía en el árbol.
+            envolver(objetivoId, TipoPieza.DIFERENCIA.name)
+            ultimoError?.let { return rechazarTaladro(abierta, it) }
+            diferencia = seleccionado
+                ?: return rechazarTaladro(abierta, "no se pudo crear la diferencia")
+            renombrar(diferencia, "${pieza.nombre} taladrada")
+        }
+
+        anadir(TipoPieza.CILINDRO.name, diferencia)
+        ultimoError?.let { return rechazarTaladro(abierta, it) }
+        val broca = seleccionado ?: return rechazarTaladro(abierta, "el taladro no se pudo identificar")
+
+        renombrar(broca, designacion?.let { "Taladro $it" } ?: "Taladro ⌀${redondeado(calibre)}")
+        fijarParametro(broca, "radio", calibre * 0.5f)
+        fijarParametro(broca, "altura", largo)
+        if (giro != Vec3.ZERO) girarPieza(broca, giro.x, giro.y, giro.z, absoluto = true)
+        mover(broca, posicion.x, posicion.y, posicion.z, absoluto = true)
+
+        // Queda seleccionada la pieza taladrada, no la broca. Dejar seleccionada la
+        // broca hacía que un segundo taladro sobre «seleccion» perforase el agujero
+        // anterior en vez de la pieza, y el resultado era una diferencia anidada que
+        // no quitaba nada. El alias, en cambio, sí nombra la broca: es lo que permite
+        // retocar el agujero después.
+        ultimoTaladro = broca
+        seleccionar(diferencia)
+
+        if (!abierta) cerrarTransaccion()
+        ultimoError = null
+        return true
+    }
+
+    /** La broca del último [taladrar], para que quien lo pidió pueda darle un alias. */
+    var ultimoTaladro: String? = null
+        private set
+
+    /**
+     * Ahueca una pieza dejando una pared imprimible, **sin cambiar sus cotas**.
+     *
+     * El `VACIADO` del kernel es un cascarón centrado en la superficie: reparte el
+     * grosor a los dos lados, así que la pieza engorda medio grosor por cada cara.
+     * Para el kernel eso está bien —es la definición limpia— pero convierte «ahueca
+     * esta caja de 40» en una caja de 41,6 que ya no encaja donde tenía que encajar,
+     * y ni el modelo ni el usuario se enteran hasta que la miden.
+     *
+     * Aquí se compensa encogiendo el primitivo un grosor entero antes de ahuecarlo,
+     * que devuelve exactamente las cotas de partida. Solo se puede hacer con
+     * primitivas, porque hay que saber qué parámetro es cada dimensión; sobre un
+     * grupo se ahueca sin compensar y se avisa, que es preferible a negarse.
+     */
+    fun ahuecar(
+        objetivoId: String,
+        grosor: Float = 0f,
+        nombrePerfil: String? = null,
+    ): Boolean {
+        if (objetivoId == documento.raiz.id) return rechazar("La raíz no se puede ahuecar")
+        val pieza = documento.buscar(objetivoId) ?: return rechazar("No existe la pieza $objetivoId")
+        val perfil = PerfilFabricacion.porNombre(nombrePerfil ?: "") ?: PerfilFabricacion.PREDETERMINADO
+
+        // El mínimo del perfil es lo que la boquilla llega a rellenar; el doble es lo
+        // que aguanta que le atornillen algo. Por eso el valor por omisión no es el
+        // mínimo: una pared en el límite pasa el analizador y se rompe en la mano.
+        val calibre = if (grosor > 0f) grosor else perfil.grosorMinimoPared * 2f
+        if (!calibre.isFinite() || calibre <= 0f) return rechazar("El grosor de pared no es válido")
+        if (calibre < perfil.grosorMinimoPared) {
+            return rechazar(
+                "Una pared de ${redondeado(calibre)} mm no llega a rellenarse con esta boquilla; " +
+                    "el mínimo del perfil «${perfil.nombre}» es ${redondeado(perfil.grosorMinimoPared)} mm",
+            )
+        }
+
+        val abierta = enTransaccion
+        if (!abierta) abrirTransaccion()
+
+        // Encoger va antes de envolver: después, el objetivo cuelga del vaciado y
+        // tocarlo obligaría a resolver de nuevo dónde acabó.
+        val compensado = encogerParaPared(pieza, calibre)
+
+        envolver(objetivoId, TipoPieza.VACIADO.name)
+        ultimoError?.let { return rechazarTaladro(abierta, it) }
+        val vaciado = seleccionado ?: return rechazarTaladro(abierta, "no se pudo crear el vaciado")
+
+        renombrar(vaciado, "${pieza.nombre} hueca")
+        fijarParametro(vaciado, "grosor", calibre)
+
+        if (!abierta) cerrarTransaccion()
+        ultimoError = if (compensado) {
+            null
+        } else {
+            // No es un rechazo: la pieza está ahuecada y es correcta. Pero el aviso
+            // sube por las omisiones para que el modelo sepa que las cotas exteriores
+            // se movieron y pueda recolocar lo que dependiera de ellas.
+            null.also {
+                avisoDeAhuecado = "«${pieza.nombre}» no es una primitiva, así que ahuecarla " +
+                    "la ha engordado ${redondeado(calibre * 0.5f)} mm por cada cara"
+            }
+        }
+        return true
+    }
+
+    /** Aviso del último [ahuecar] que no pudo conservar las cotas, o `null`. */
+    var avisoDeAhuecado: String? = null
+        private set
+
+    /**
+     * Encoge las cotas de una primitiva un grosor entero. Devuelve si pudo.
+     *
+     * Las claves están escritas a mano porque no hay forma de deducir del catálogo
+     * cuáles de los parámetros son una dimensión completa —`anchura`— y cuáles un
+     * radio, que cuenta la mitad. Equivocarse ahí da una pared del doble o de la
+     * mitad de lo pedido.
+     */
+    private fun encogerParaPared(pieza: Pieza, grosor: Float): Boolean {
+        val enteras = when (pieza.tipo) {
+            TipoPieza.CAJA -> listOf("anchura", "altura", "profundidad")
+            TipoPieza.CILINDRO -> listOf("altura")
+            TipoPieza.CONO -> listOf("altura")
+            TipoPieza.CAPSULA -> listOf("altura")
+            else -> emptyList()
+        }
+        val radios = when (pieza.tipo) {
+            TipoPieza.ESFERA -> listOf("radio")
+            TipoPieza.CILINDRO -> listOf("radio")
+            TipoPieza.CONO -> listOf("radioInferior", "radioSuperior")
+            TipoPieza.CAPSULA -> listOf("radio")
+            else -> emptyList()
+        }
+        if (enteras.isEmpty() && radios.isEmpty()) return false
+
+        val claves = pieza.tipo.parametros.map { it.clave }.toSet()
+        for (clave in enteras) {
+            if (clave !in claves) continue
+            val destino = pieza.parametro(clave) - grosor
+            if (destino <= 0f) return false
+            fijarParametro(pieza.id, clave, destino)
+        }
+        for (clave in radios) {
+            if (clave !in claves) continue
+            val actual = pieza.parametro(clave)
+            // Un radio de 0 es legítimo en un cono, y encogerlo no tiene sentido.
+            if (actual <= 0f) continue
+            val destino = actual - grosor * 0.5f
+            if (destino <= 0f) return false
+            fijarParametro(pieza.id, clave, destino)
+        }
+        return true
+    }
+
+    private fun rechazarTaladro(estabaAbierta: Boolean, motivo: String): Boolean {
+        if (!estabaAbierta) cerrarTransaccion()
+        return rechazar(motivo)
+    }
+
+    private fun redondeado(v: Float): String {
+        val r = kotlin.math.round(v * 100f) / 100f
+        return if (r == r.toInt().toFloat()) r.toInt().toString() else r.toString()
+    }
+
+    fun colocar(
+        id: String,
+        referenciaId: String,
+        caraNombre: String,
+        holgura: Float = 0f,
+        centrar: Boolean = true,
+    ): Boolean {
+        if (id == referenciaId) return rechazar("Una pieza no puede colocarse respecto a sí misma")
+        if (!holgura.isFinite()) return rechazar("La holgura no es un número válido")
+        val cara = Cara.entries.firstOrNull { it.name == caraNombre.uppercase() }
+            ?: return rechazar("Cara desconocida: $caraNombre")
+        // Mover un ancestro arrastraría la referencia con él y el resultado no
+        // convergería nunca; es mejor decirlo que dejar la pieza en un sitio raro.
+        if (esAncestro(id, referenciaId)) {
+            return rechazar("«$id» contiene a «$referenciaId»: colocarla movería también la referencia")
+        }
+
+        val objetivo = documento.cotasEnMundoDe(id)
+            ?: return rechazar("No se pueden medir las cotas de $id")
+        val referencia = documento.cotasEnMundoDe(referenciaId)
+            ?: return rechazar("No se pueden medir las cotas de $referenciaId")
+
+        var dx = 0f
+        var dy = 0f
+        var dz = 0f
+        when (cara) {
+            Cara.ARRIBA -> dy = referencia.max.y + holgura - objetivo.min.y
+            Cara.ABAJO -> dy = referencia.min.y - holgura - objetivo.max.y
+            Cara.DERECHA -> dx = referencia.max.x + holgura - objetivo.min.x
+            Cara.IZQUIERDA -> dx = referencia.min.x - holgura - objetivo.max.x
+            Cara.DELANTE -> dz = referencia.max.z + holgura - objetivo.min.z
+            Cara.DETRAS -> dz = referencia.min.z - holgura - objetivo.max.z
+        }
+        if (centrar) {
+            // Centrar solo en los ejes que la cara no fija: el eje de apoyo ya está
+            // resuelto y volver a tocarlo desharía la colocación.
+            if (dx == 0f) dx = referencia.center.x - objetivo.center.x
+            if (dy == 0f) dy = referencia.center.y - objetivo.center.y
+            if (dz == 0f) dz = referencia.center.z - objetivo.center.z
+        }
+        return desplazarEnElMundo(id, Vec3(dx, dy, dz))
+    }
+
+    /** Alinea una pieza con otra en un eje, por centro o por una de sus caras. */
+    fun alinear(id: String, referenciaId: String, ejeNombre: String, modo: String): Boolean {
+        if (id == referenciaId) return rechazar("Una pieza no puede alinearse consigo misma")
+        val eje = Axis.entries.firstOrNull { it.name == ejeNombre.uppercase() }
+            ?: return rechazar("Eje desconocido: $ejeNombre")
+        if (esAncestro(id, referenciaId)) {
+            return rechazar("«$id» contiene a «$referenciaId»: alinearla movería también la referencia")
+        }
+        val objetivo = documento.cotasEnMundoDe(id) ?: return rechazar("No se pueden medir las cotas de $id")
+        val referencia = documento.cotasEnMundoDe(referenciaId)
+            ?: return rechazar("No se pueden medir las cotas de $referenciaId")
+
+        fun componente(c: Vec3) = when (eje) {
+            Axis.X -> c.x
+            Axis.Y -> c.y
+            Axis.Z -> c.z
+        }
+
+        val delta = when (modo.uppercase()) {
+            "MINIMO" -> componente(referencia.min) - componente(objetivo.min)
+            "MAXIMO" -> componente(referencia.max) - componente(objetivo.max)
+            else -> componente(referencia.center) - componente(objetivo.center)
+        }
+        val vector = when (eje) {
+            Axis.X -> Vec3(delta, 0f, 0f)
+            Axis.Y -> Vec3(0f, delta, 0f)
+            Axis.Z -> Vec3(0f, 0f, delta)
+        }
+        return desplazarEnElMundo(id, vector)
+    }
+
+    /**
+     * Suma un desplazamiento expresado en el mundo a la posición local de la pieza.
+     *
+     * La traslación de una pieza vive en el espacio de su padre, así que un vector
+     * del mundo hay que llevarlo allí. Se hace transformando dos puntos y restando
+     * en lugar de invertir la matriz: así la rotación y la escala del padre entran
+     * solas y no hay álgebra que equivocar.
+     */
+    private fun desplazarEnElMundo(id: String, delta: Vec3): Boolean {
+        if (delta.length() < 1e-6f) return false
+        val padre = documento.transformDelPadreDe(id)
+            ?: return rechazar("No se encuentra el padre de $id")
+        val enLocal = padre.worldToLocal(delta) - padre.worldToLocal(Vec3.ZERO)
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(id) {
+                    it.copy(transform = it.transform.copy(translation = it.transform.translation + enLocal))
+                },
+            )
+        }
+    }
+
+    private fun esAncestro(posibleAncestro: String, id: String): Boolean {
+        if (posibleAncestro == id) return true
+        val pieza = documento.buscar(posibleAncestro) ?: return false
+        return pieza.aplanar().any { (p, _) -> p.id == id }
+    }
+
     // ------------------------------------------------------------------ historial
 
     fun deshacer(): Boolean {
@@ -288,6 +1555,79 @@ class Editor(inicial: Documento = Documento.vacio()) {
         return true
     }
 
+    // ---------------------------------------------------- historial navegable
+
+    /**
+     * Los planes de la IA que se aplicaron, en orden.
+     *
+     * Es la mitad valiosa del historial de un CAD: no un hilo de deshacer sino las
+     * operaciones de dominio que construyeron la pieza, listas para re-ejecutarse.
+     * Las primitivas sueltas siguen siendo estado y no historia; mezclarlas es un
+     * rediseño y no lo pide nadie.
+     */
+    val planesAplicados: List<PlanDeModelado> get() = documento.planesAplicados
+
+    /** Añade un plan aplicado a la historia del documento. Lo llama el `Aplicador`. */
+    fun registrarPlanAplicado(plan: PlanDeModelado) {
+        documento = documento.copy(planesAplicados = documento.planesAplicados + plan)
+        regenerar()
+    }
+
+    /**
+     * Reproduce los planes aplicados sobre un documento vacío y devuelve el resultado.
+     *
+     * Ejecuta la misma maquinaria que aplicó los planes la primera vez (`Aplicador`),
+     * así que si la reproducción diverge del documento actual es un fallo del núcleo
+     * y no de la maquinaria. Devuelve `null` si algún plan ya no se puede re-ejecutar
+     * —p. ej. porque el catálogo cambió— y explica el motivo.
+     */
+    fun reproducirPlanes(): Documento? {
+        val repuesto = Editor(Documento.vacio())
+        for (plan in documento.planesAplicados) {
+            val resultado = Aplicador(repuesto, perfilActivo()).aplicar(plan)
+            if (!resultado.exito) {
+                ultimoError = "El historial no se puede reproducir: ${resultado.error ?: "plan fallido"}"
+                return null
+            }
+        }
+        return repuesto.documentoActual
+    }
+
+    /**
+     * Reemplaza el plan [indice] del historial por [nuevo] y rehace todo lo demás.
+     *
+     * Es «los agujeros eran M3, ponlos M4» sin deshacer treinta pasos: se reconstruye
+     * el documento desde cero ejecutando la historia con el plan nuevo en su sitio, y
+     * si el resultado es válido se aplica como una sola edición —un solo ⌘Z—. Si el
+     * plan nuevo ya no reproduce (el catálogo cambió, la operación ya no existe), el
+     * documento queda intacto y se explica por qué.
+     */
+    fun reemplazarPlanEnHistoria(indice: Int, nuevo: PlanDeModelado): Boolean {
+        val planes = documento.planesAplicados
+        if (indice !in planes.indices) return rechazar("No existe el paso $indice del historial")
+
+        val repuesto = Editor(Documento.vacio())
+        for ((i, plan) in planes.withIndex()) {
+            val cual = if (i == indice) nuevo else plan
+            val resultado = Aplicador(repuesto, perfilActivo()).aplicar(cual)
+            if (!resultado.exito) {
+                return rechazar("El paso ${i + 1} no se puede reproducir: ${resultado.error ?: "plan fallido"}")
+            }
+        }
+
+        val reconstruido = repuesto.documentoActual.copy(
+            planesAplicados = planes.mapIndexed { i, plan -> if (i == indice) nuevo else plan },
+        )
+        aplicar { reconstruido }
+        // El booleano de `aplicar` significa «hay que recompilar», no «salió bien»:
+        // cambiar M3 por M4 no cambia la topología del shader. La señal buena es la
+        // de siempre, `ultimoError`.
+        return ultimoError == null
+    }
+
+    /** El perfil de fabricación por defecto, para el repuesto de la reproducción. */
+    private fun perfilActivo(): PerfilFabricacion = PerfilFabricacion.PREDETERMINADO
+
     // ------------------------------------------------------------------ exportar
 
     /** Resolución de partida: fina pero acotada para que el mallado no se dispare. */
@@ -304,17 +1644,585 @@ class Editor(inicial: Documento = Documento.vacio()) {
      * Devuelve `null` si no hay nada que exportar. Si la malla no pasa el examen no
      * se escribe archivo alguno: el certificado explica por qué.
      */
-    fun exportarStl(ruta: String, resolucion: Float, alAvanzar: ((Float) -> Unit)? = null): Certificado? {
+    fun exportarStl(ruta: String, resolucion: Float, alAvanzar: ((Float) -> Unit)? = null): Certificado? =
+        exportar(ruta, resolucion, alAvanzar) { exportador, paso, suelo ->
+            exportador.exportarStl(ruta, paso, suelo)
+        }
+
+    /**
+     * Exporta a 3MF, con el mismo examen y el mismo certificado.
+     *
+     * Es el formato que hay que ofrecer primero: un STL no declara unidades, y esa
+     * omisión es la causa del clásico modelo que entra en el laminador a 1/25 de su
+     * tamaño. El 3MF además llega ya apoyado en el plato y con la Z arriba, así que
+     * la orientación que se eligió en Yunkil es la que se imprime.
+     */
+    fun exportarTresMf(ruta: String, resolucion: Float, alAvanzar: ((Float) -> Unit)? = null): Certificado? =
+        exportar(ruta, resolucion, alAvanzar) { exportador, paso, suelo ->
+            exportador.exportarTresMf(ruta, paso, suelo, documento.raiz.nombre)
+        }
+
+    /**
+     * Exporta por la extensión del archivo que eligió el usuario.
+     *
+     * El formato lo decide el nombre que se escribe en el diálogo de guardar, que es
+     * donde ya lo está decidiendo de hecho: obligar además a elegirlo en un menú
+     * aparte es una pregunta que se puede contestar sola.
+     */
+    fun exportarPieza(ruta: String, resolucion: Float, alAvanzar: ((Float) -> Unit)? = null): Certificado? =
+        if (ruta.lowercase().endsWith(".3mf")) exportarTresMf(ruta, resolucion, alAvanzar)
+        else exportarStl(ruta, resolucion, alAvanzar)
+
+    private fun exportar(
+        ruta: String,
+        resolucion: Float,
+        alAvanzar: ((Float) -> Unit)?,
+        escribir: (Exportador, Float, Float) -> Certificado,
+    ): Certificado? {
+        if (ruta.isBlank()) return rechazarNulo("No se dijo dónde guardar la pieza")
+        if (!resolucion.isFinite() || resolucion <= 0f) return rechazarNulo("La resolución de exportación no es válida")
         val nodo = documento.compilar() ?: return rechazarNulo("El documento no tiene material que exportar")
+        val celdas = yunkil.malla.estimarCeldas(nodo, resolucion)
+        if (celdas <= 0L || celdas > 250_000_000L) {
+            return rechazarNulo("La exportación recorrería ${celdas.coerceAtLeast(0)} celdas. Aumenta el valor de detalle para evitar agotar la memoria.")
+        }
         val exportador = Exportador(nodo)
         exportador.alAvanzar = alAvanzar
         ultimoError = null
-        return exportador.exportarStl(ruta, resolucion)
+        val suelo = resolucionUtil(nodo, 0f)
+        return escribir(exportador, maxOf(resolucion, suelo), suelo)
+    }
+
+    /**
+     * La resolución más fina que tiene sentido para este árbol.
+     *
+     * Una malla importada no es una fórmula: es una rejilla de valores con un paso
+     * concreto. Mallarla por debajo de ese paso no añade ni un detalle —la información
+     * no está— y en cambio saca artefactos, porque el campo interpolado tiene esquinas
+     * en las caras de sus propias celdas y el contorneado dual las persigue.
+     *
+     * Se midió: la misma pieza sale estanca a 0,6 y a 0,4 mm, y agujereada a 0,125.
+     * Así que el exportador no baja del paso del campo más grueso del árbol. Es la
+     * misma disciplina que publicar la desviación en vez de esconderla: el límite
+     * existe, y más vale que lo imponga la herramienta a que lo descubra el usuario
+     * con un STL roto.
+     */
+    private fun resolucionUtil(nodo: SdfNode, pedida: Float): Float {
+        var tope = 0f
+        fun recorrer(n: SdfNode) {
+            if (n is CampoDeMalla) tope = maxOf(tope, n.resolucion)
+            n.hijos.forEach(::recorrer)
+        }
+        recorrer(nodo)
+        return if (tope > 0f) maxOf(pedida, tope) else pedida
     }
 
     private fun rechazarNulo(motivo: String): Certificado? {
         ultimoError = motivo
         return null
+    }
+
+    // ------------------------------------------------------------------ fabricación
+
+    /** Nombres de los perfiles de fabricación disponibles. */
+    fun perfilesDeFabricacion(): List<String> =
+        PerfilFabricacion.VERIFICADOS.map { it.nombre }
+
+    /**
+     * Grosor mínimo de pared que exige un perfil, en milímetros.
+     *
+     * Es el umbral del tinte de la cara de corte de la sección en vivo: por debajo
+     * la pared no se llena, así que se tiñe de rojo. El valor sale de aquí —del
+     * perfil, con su boquilla y sus perímetros— y no de una constante de la vista.
+     */
+    fun grosorMinimoDePared(nombrePerfil: String): Float =
+        (PerfilFabricacion.porNombre(nombrePerfil) ?: PerfilFabricacion.PREDETERMINADO)
+            .grosorMinimoPared
+
+    /**
+     * Examina la pieza contra un perfil de impresora y devuelve el informe.
+     *
+     * Se le pasa el documento además del campo compilado para que cada aviso pueda
+     * nombrar la pieza que lo causa: es la diferencia entre «hay una pared fina» y
+     * «el cilindro *Agujero del eje* deja 0,9 mm».
+     */
+    fun analizarFabricacion(
+        nombrePerfil: String? = null,
+        alAvanzar: ((Float) -> Unit)? = null,
+    ): InformeDeFabricacion? {
+        val nodo = documento.compilar()
+            ?: return rechazarInforme("El documento no tiene material que analizar")
+        val perfil = PerfilFabricacion.porNombre(nombrePerfil ?: "") ?: PerfilFabricacion.PREDETERMINADO
+        val analizador = AnalizadorFdm(nodo, perfil, documento)
+        analizador.alAvanzar = alAvanzar
+        ultimoError = null
+        return analizador.analizar()
+    }
+
+    /** Orientaciones de impresión candidatas, de mejor a peor. */
+    fun orientacionesDeImpresion(nombrePerfil: String? = null): List<OrientacionEvaluada> {
+        val nodo = documento.compilar() ?: return emptyList()
+        val perfil = PerfilFabricacion.porNombre(nombrePerfil ?: "") ?: PerfilFabricacion.PREDETERMINADO
+        return BuscadorDeOrientacion(nodo, perfil).buscar()
+    }
+
+    /**
+     * Aplica una corrección propuesta por el analizador.
+     *
+     * Pasa por el mismo camino que cualquier edición manual: entra en el historial y
+     * se puede deshacer. Un arreglo que no se puede deshacer no es un arreglo, es un
+     * riesgo.
+     */
+    fun aplicarCorreccion(correccion: Correccion): Boolean = when (correccion.accion) {
+        AccionCorrectora.FIJAR_PARAMETRO -> {
+            val id = correccion.piezaId
+            val clave = correccion.clave
+            if (id == null || clave == null) {
+                rechazar("La corrección no dice qué parámetro cambiar")
+            } else {
+                val cambio = fijarParametro(id, clave, correccion.valor)
+                if (ultimoError == null) confirmarEdicionContinua()
+                cambio || ultimoError == null
+            }
+        }
+
+        AccionCorrectora.ROTAR_MODELO -> girarModelo(correccion.valor, correccion.valorSecundario)
+
+        AccionCorrectora.ESCALAR_MODELO -> {
+            if (!correccion.valor.isFinite() || correccion.valor <= 0f) {
+                rechazar("El factor de escala debe ser positivo")
+            } else {
+                val actual = documento.raiz.transform
+                aplicar { doc ->
+                    doc.copy(raiz = doc.raiz.copy(transform = actual.copy(scale = actual.scale * correccion.valor)))
+                }
+                ultimoError == null
+            }
+        }
+
+        AccionCorrectora.ASENTAR_EN_PLATO -> asentarEnPlato()
+
+        AccionCorrectora.MOVER_PIEZA -> {
+            val id = correccion.piezaId
+            val vector = correccion.vector
+            if (id == null || vector.size < 3) {
+                rechazar("La corrección no dice qué pieza mover ni hacia dónde")
+            } else {
+                // `vector` es la dirección unitaria y `valor` la distancia en mm.
+                val cambio = mover(
+                    id,
+                    vector[0] * correccion.valor,
+                    vector[1] * correccion.valor,
+                    vector[2] * correccion.valor,
+                )
+                if (ultimoError == null) confirmarEdicionContinua()
+                cambio || ultimoError == null
+            }
+        }
+    }
+
+    /** Gira el modelo entero sobre el plato, acumulando sobre el giro que ya tuviera. */
+    fun girarModelo(gradosX: Float, gradosZ: Float): Boolean {
+        if (!gradosX.isFinite() || !gradosZ.isFinite()) return rechazar("El giro no es un número válido")
+        if (gradosX == 0f && gradosZ == 0f) return false
+
+        val aRadianes = kotlin.math.PI.toFloat() / 180f
+        val giro = Quat.fromAxisAngle(Vec3(0f, 0f, 1f), gradosZ * aRadianes) *
+            Quat.fromAxisAngle(Vec3(1f, 0f, 0f), gradosX * aRadianes)
+
+        val actual = documento.raiz.transform
+        aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.copy(
+                    transform = actual.copy(rotation = (giro * actual.rotation).normalized()),
+                ),
+            )
+        }
+        // Girar suele dejar la pieza atravesando el plato o flotando; asentarla
+        // después es lo que el usuario habría hecho a mano en el paso siguiente.
+        asentarEnPlato(registrarEnHistorial = false)
+        return ultimoError == null
+    }
+
+    /** Baja o sube el modelo hasta que su cota inferior descanse en el plato. */
+    fun asentarEnPlato(registrarEnHistorial: Boolean = true): Boolean {
+        val nodo = documento.compilar() ?: return rechazar("No hay nada que asentar")
+        val desfase = nodo.cotas().min.y
+        if (abs(desfase) < 1e-4f) return false
+        val actual = documento.raiz.transform
+        aplicar(registrarEnHistorial) { doc ->
+            doc.copy(
+                raiz = doc.raiz.copy(
+                    transform = actual.copy(
+                        translation = actual.translation - Vec3(0f, desfase, 0f),
+                    ),
+                ),
+            )
+        }
+        return ultimoError == null
+    }
+
+    private fun rechazarInforme(motivo: String): InformeDeFabricacion? {
+        ultimoError = motivo
+        return null
+    }
+
+    // ------------------------------------------------------------------ IA
+
+    /**
+     * El documento descrito para un modelo de lenguaje: identificadores, medidas en
+     * milímetros y cotas reales en el mundo. No es el JSON del documento, que gasta
+     * muchos más tokens y no dice dónde acaba cada pieza.
+     */
+    fun contextoParaModelo(): String = documento.contextoParaModelo()
+
+    // MARK: El hilo de la conversación
+
+    val conversacion: Conversacion get() = documento.conversacion
+
+    /**
+     * Cuántas ediciones ha hecho la persona a mano. Sirve para saber si el hilo miente.
+     *
+     * Se cuenta aquí y no con una bandera porque una bandera hay que acordarse de
+     * ponerla en cada camino que edita el documento —y son muchos: arrastrar una cara,
+     * mover con el inspector, borrar, pegar— y el día que se olvide uno el modelo
+     * corregirá de memoria una pieza que ya cambió, sin que nada lo delate.
+     */
+    private var edicionesAMano: Int = 0
+
+    /** El valor del contador cuando se habló con el modelo por última vez. */
+    private var edicionesAlUltimoTurno: Int = 0
+
+    /** ¿Ha tocado la persona el modelo desde el último turno? */
+    val tocadoAManoDesdeElUltimoTurno: Boolean
+        get() = edicionesAMano > edicionesAlUltimoTurno
+
+    /** Añade lo que pidió la persona al hilo. */
+    fun anotarPeticion(texto: String) {
+        documento = documento.copy(
+            conversacion = documento.conversacion.con(Turno(Rol.PERSONA, texto)),
+        )
+        edicionesAlUltimoTurno = edicionesAMano
+        regenerar()
+    }
+
+    /** Añade al hilo qué se hizo con la última propuesta. */
+    fun anotarRespuesta(
+        desenlaceNombre: String,
+        aplicadas: List<String>,
+        rechazadas: List<String>,
+    ) {
+        val desenlace = Desenlace.entries.firstOrNull { it.name == desenlaceNombre.uppercase() }
+        documento = documento.copy(
+            conversacion = documento.conversacion.con(
+                Turno(
+                    rol = Rol.YUNKIL,
+                    texto = "",
+                    desenlace = desenlace,
+                    aplicadas = aplicadas,
+                    rechazadas = rechazadas,
+                ),
+            ),
+        )
+        edicionesAlUltimoTurno = edicionesAMano
+        regenerar()
+    }
+
+    /**
+     * Borra el hilo sin tocar la geometría.
+     *
+     * No entra en el historial de deshacer a propósito: ⌘Z habla de la pieza, y
+     * mezclar en esa pila un cambio que no se ve en pantalla convierte el deshacer en
+     * una caja negra —se pulsa, no cambia nada visible, se vuelve a pulsar y se pierde
+     * trabajo real—.
+     */
+    fun olvidarConversacion() {
+        documento = documento.copy(conversacion = Conversacion())
+        edicionesAlUltimoTurno = edicionesAMano
+        regenerar()
+    }
+
+    /**
+     * El documento y el hilo, que es lo que se le manda al modelo como mensaje de
+     * usuario.
+     *
+     * Van juntos y en este orden a propósito: primero los **hechos** —las cotas
+     * medidas del documento, que se recalculan cada vez— y después la **intención**
+     * —de qué se venía hablando—. Si se cruzaran, un hilo que dijera «la caja mide 60»
+     * competiría con un contexto que mide 58 después de un `acotar`, y no hay forma de
+     * que el modelo sepa cuál creer.
+     */
+    fun contextoConHilo(presupuestoDelHilo: Int = 1200): String {
+        val hilo = documento.conversacion.paraModelo(
+            presupuesto = presupuestoDelHilo,
+            tocadoAMano = tocadoAManoDesdeElUltimoTurno,
+        )
+        val contexto = documento.contextoParaModelo()
+        return if (hilo.isEmpty()) contexto else "$contexto\n\n$hilo"
+    }
+
+    /** Las instrucciones del sistema, generadas desde el propio catálogo del kernel. */
+    /**
+     * El mensaje de sistema, con los ejemplares que vienen a cuento de [peticion].
+     *
+     * Sin la petición no se pueden elegir ejemplos, y sin ejemplos el catálogo
+     * verificado no sirve para nada: estuvo escrito y sin usar, y el efecto era que el
+     * modelo ignoraba las operaciones de dominio —`patron`, `taladro`, `acotar`— y
+     * volvía a apilar cajas con coordenadas a ojo, que es justo lo que existen para
+     * evitar.
+     */
+    fun instruccionesParaModelo(nombrePerfil: String? = null, peticion: String? = null): String {
+        val perfil = PerfilFabricacion.porNombre(nombrePerfil ?: "") ?: PerfilFabricacion.PREDETERMINADO
+        val base = Vocabulario.instrucciones(perfil)
+        val ejemplos = peticion?.takeIf { it.isNotBlank() }?.let { Vocabulario.ejemplares(it) }.orEmpty()
+        return base + ejemplos
+    }
+
+    /**
+     * El mismo mensaje de sistema, más las reglas que solo aplican con una imagen.
+     *
+     * Se suma en vez de sustituir porque la geometría no cambia por mirar una foto:
+     * lo que cambia es de dónde sale la información y qué no se puede sacar de ahí.
+     * [medidaConocida] es la cota que ha dado la persona, ya redactada; sin ella el
+     * modelo tiene orden de pedirla en el resumen en vez de inventarse los
+     * milímetros, que es lo que hace cualquier modelo cuando se le deja.
+     */
+    fun instruccionesParaModeloConImagen(
+        nombrePerfil: String? = null,
+        medidaConocida: String? = null,
+        peticion: String? = null,
+    ): String = instruccionesParaModelo(nombrePerfil, peticion) +
+        Vocabulario.instruccionesDeImagen(medidaConocida?.takeIf { it.isNotBlank() })
+
+    fun correccionParaModelo(motivo: String, respuestaAnterior: String): String =
+        Vocabulario.correccion(motivo, respuestaAnterior)
+
+    /** El reintento cuando el plan se entendió pero la pieza que sale no se sostiene. */
+    fun revisionParaModelo(motivos: List<String>, respuestaAnterior: String): String =
+        Vocabulario.revision(motivos, respuestaAnterior)
+
+    /**
+     * Anota en la bitácora qué hizo el usuario con una propuesta.
+     *
+     * Se registra el desenlace, no la propuesta: lo que hace falta para afinar un
+     * modelo algún día no es el plan —eso se puede generar a millares— sino si la
+     * persona se quedó con la pieza. Ese dato solo existe en el instante en que
+     * ocurre, así que se apunta ahora aunque todavía no haya nada que lo lea.
+     *
+     * Devuelve `false` si no se pudo escribir, y no pasa nada más: quedarse sin
+     * registro es perder una medida, y hacer fallar una edición por eso sería
+     * cambiar un problema pequeño por uno grande.
+     */
+    fun registrarDesenlace(
+        ruta: String,
+        id: String,
+        momento: Long,
+        peticion: String,
+        plan: String,
+        nombrePerfil: String,
+        rondas: Int,
+        reparos: List<String>,
+        desenlaceNombre: String,
+        rechazadas: List<String> = emptyList(),
+    ): Boolean {
+        val desenlace = Desenlace.entries.firstOrNull { it.name == desenlaceNombre.uppercase() }
+            ?: return false
+        return anadirLinea(
+            ruta,
+            Bitacora.aLinea(
+                Asiento(
+                    id = id,
+                    momento = momento,
+                    peticion = peticion,
+                    plan = plan,
+                    perfil = nombrePerfil,
+                    rondas = rondas,
+                    reparos = reparos,
+                    desenlace = desenlace,
+                    rechazadas = rechazadas,
+                ),
+            ),
+        )
+    }
+
+    /**
+     * Interpreta la respuesta cruda de un modelo. No toca el documento.
+     *
+     * Separar interpretar de aplicar es lo que permite enseñar la propuesta antes de
+     * ejecutarla: el usuario ve qué va a pasar y decide.
+     */
+    fun interpretarPlan(respuesta: String, edicion: Boolean = false): PlanInterpretado {
+        return when (val r = Interprete.interpretar(respuesta, edicion = edicion)) {
+            is ResultadoDeInterpretacion.Rechazado -> PlanInterpretado(null, r.motivo, emptyList())
+            is ResultadoDeInterpretacion.Aceptado -> PlanInterpretado(r.plan, null, r.avisos)
+        }
+    }
+
+    /**
+     * Aplica un plan ya interpretado, como una sola transacción deshacible.
+     *
+     * El perfil viaja hasta aquí porque las operaciones de dominio lo necesitan: el
+     * diámetro de un taladro de paso depende de cuánto cierra los agujeros *esta*
+     * impresora, y resolverlo con el perfil por omisión daría una pieza que encaja
+     * en el papel y no en la mesa.
+     */
+    fun aplicarPlan(plan: PlanDeModelado, nombrePerfil: String? = null): ResultadoDeAplicacion =
+        Aplicador(
+            this,
+            PerfilFabricacion.porNombre(nombrePerfil ?: "") ?: PerfilFabricacion.PREDETERMINADO,
+        ).aplicar(plan)
+
+    /**
+     * Aplica solo las operaciones que el usuario aceptó.
+     *
+     * Antes un plan era todo o nada: cinco operaciones buenas y una mala se
+     * descartaban juntas, y recuperarlas exigía volver a pedírselo al modelo con la
+     * esperanza de que esta vez saliera igual menos una. Aquí se marca lo que sirve.
+     *
+     * La selección pasa por [Explicacion.podar] **siempre**, aunque la interfaz ya la
+     * haya cerrado: una operación que nombra un alias que no se va a crear no falla,
+     * se omite en silencio, y ese es exactamente el fallo callado que el resto del
+     * bucle existe para no tener. El plan que se registra en el historial es el
+     * podado, porque el historial tiene que contar lo que se hizo y no lo que se
+     * propuso.
+     */
+    fun aplicarParteDelPlan(
+        plan: PlanDeModelado,
+        aceptadas: Set<Int>,
+        nombrePerfil: String? = null,
+    ): ResultadoDeAplicacion {
+        val vivas = Explicacion.podar(plan, aceptadas)
+        if (vivas.isEmpty()) {
+            return ResultadoDeAplicacion(0, emptyList(), "no se aceptó ninguna operación")
+        }
+        val parcial = plan.copy(
+            operaciones = plan.operaciones.filterIndexed { i, _ -> i in vivas },
+            // `reemplazar` vacía el documento antes de empezar. Aceptar media propuesta
+            // no puede querer decir «y de paso tira lo que ya tenías»: si el usuario
+            // descartó parte de lo que iba a sustituir el trabajo previo, sustituirlo
+            // igual destruiría más de lo que se acepta.
+            reemplazar = plan.reemplazar && vivas.size == plan.operaciones.size,
+        )
+        return aplicarPlan(parcial, nombrePerfil)
+    }
+
+    /**
+     * El plan contado en español, listo para enseñarlo con una casilla por línea.
+     *
+     * Va por aquí y no llamando a `Explicacion` desde la aplicación porque toda la
+     * superficie que consume Swift entra por `Editor`: un `object` de Kotlin cruza el
+     * puente con otro nombre y otra forma según la versión del compilador, y eso ya
+     * ha costado un rato antes.
+     */
+    fun explicarPlan(plan: PlanDeModelado): List<LineaExplicada> = Explicacion.de(plan)
+
+    /** Cierra hacia abajo la selección de operaciones: quita lo que quedaría huérfano. */
+    fun podarSeleccion(plan: PlanDeModelado, marcadas: List<Int>): List<Int> =
+        Explicacion.podar(plan, marcadas.toSet()).sorted()
+
+    /** Cierra hacia arriba: añade lo que necesita lo que se acaba de marcar. */
+    fun completarSeleccion(plan: PlanDeModelado, marcadas: List<Int>): List<Int> =
+        Explicacion.completar(plan, marcadas.toSet()).sorted()
+
+    /** Aplica solo las operaciones marcadas. Ver [aplicarParteDelPlan]. */
+    fun aplicarParte(
+        plan: PlanDeModelado,
+        aceptadas: List<Int>,
+        nombrePerfil: String? = null,
+    ): ResultadoDeAplicacion = aplicarParteDelPlan(plan, aceptadas.toSet(), nombrePerfil)
+
+    /**
+     * Ejecuta el plan en un banco de pruebas y mide lo que sale, sin tocar nada.
+     *
+     * El documento es inmutable, así que un `Editor` nuevo sobre él es un duplicado
+     * aislado y no hay nada que restaurar después: el peor caso de esta función es
+     * que se tire el banco entero.
+     *
+     * Esto es lo que cierra el bucle con el modelo. Hasta aquí el modelo escribía y
+     * nadie miraba el resultado; ahora la misma regla que le avisa al usuario de que
+     * una pieza arranca en el aire le llega a él antes de que el usuario vea nada.
+     */
+    fun revisarPlan(plan: PlanDeModelado, nombrePerfil: String? = null): RevisionDePlan {
+        val banco = Editor(documento)
+        val aplicacion = banco.aplicarPlan(plan)
+        if (!aplicacion.exito) {
+            return RevisionDePlan.noAplicable(aplicacion.error ?: aplicacion.resumen)
+        }
+        val nodo = banco.documento.compilar()
+            ?: return RevisionDePlan.noAplicable("el plan no deja ninguna geometría que analizar")
+
+        // Primero el modelado y después la fabricación: si las piezas ni siquiera se
+        // tocan, los avisos de voladizo y pared son ruido sobre una pieza que todavía
+        // no existe, y mandárselos al modelo lo distrae del fallo que importa.
+        //
+        // Las omisiones abren la lista porque son el fallo más concreto que existe:
+        // el modelo pidió algo textual que no ocurrió, y hasta ahora se enteraba el
+        // usuario en un aviso y el modelo no se enteraba nunca.
+        val perfilDeRevision = PerfilFabricacion.porNombre(nombrePerfil ?: "")
+            ?: PerfilFabricacion.PREDETERMINADO
+        val deModelado =
+            aplicacion.omitidas + RevisorDeGeometria.revisar(banco.documento, nodo, perfilDeRevision)
+        if (deModelado.isNotEmpty()) return RevisionDePlan(deModelado, null)
+
+        val informe = banco.analizarFabricacion(nombrePerfil)
+            ?: return RevisionDePlan.noAplicable(
+                banco.ultimoError ?: "el plan no deja ninguna geometría que analizar",
+            )
+        return RevisionDePlan.de(informe)
+    }
+
+    /**
+     * Cose un plan: le añade las operaciones que unen lo que quedó suelto.
+     *
+     * El banco dejó el diagnóstico cerrado —el único modo de fallo que queda es el
+     * contacto entre piezas— y también el límite del remedio anterior: enseñarle al
+     * modelo la operación literal subió la geometría limpia de 6/8 a 7/8, pero
+     * seguía dependiendo de que el modelo la transcribiera bien y de gastar una
+     * ronda de inferencia en algo que Yunkil ya sabía.
+     *
+     * Si el revisor sabe *qué* operación arregla la pieza, aquí se aplica. Y no a
+     * ciegas: se vuelve a medir el campo sobre el resultado, y solo se devuelve el
+     * plan cosido si los sólidos quedaron de verdad unidos. Si no, se devuelve
+     * `null` y el fallo sigue su camino hacia la ronda de corrección con el modelo,
+     * que es donde estaba antes. Coser nunca puede dejar la pieza peor.
+     *
+     * Devuelve `null` también cuando no había nada que coser.
+     */
+    fun coserPlan(plan: PlanDeModelado, nombrePerfil: String? = null): PlanDeModelado? {
+        val perfil = PerfilFabricacion.porNombre(nombrePerfil ?: "") ?: PerfilFabricacion.PREDETERMINADO
+        val antes = reparosDe(plan, nombrePerfil, perfil) ?: return null
+        val arreglos = antes.flatMap { it.arreglos }
+        if (arreglos.isEmpty()) return null
+
+        // Dos intentos, en orden de menor a mayor intervención. El primero solo pega
+        // la pieza por la cara que toca; el segundo la centra además en los otros dos
+        // ejes, que arregla el caso en que el modelo tampoco acertó esa parte y
+        // estropea el caso en que el desplazamiento era intencionado. Cuál sirve no
+        // se supone: se prueba contra el campo y se mide.
+        val candidatos = listOf(
+            arreglos,
+            arreglos.map { if (it is Colocar) it.copy(centrar = true) else it },
+        )
+        for (candidato in candidatos) {
+            val propuesta = plan.copy(operaciones = plan.operaciones + candidato)
+            val despues = reparosDe(propuesta, nombrePerfil, perfil) ?: continue
+            val cerroElContacto = despues.none { it.clase == ClaseDeFallo.SOLIDOS_SUELTOS }
+            if (cerroElContacto && despues.size <= antes.size) return propuesta
+        }
+        return null
+    }
+
+    /** Los fallos de modelado que deja un plan, medidos en un banco. `null` si no aplica. */
+    private fun reparosDe(
+        plan: PlanDeModelado,
+        nombrePerfil: String?,
+        perfil: PerfilFabricacion,
+    ): List<Reparo>? {
+        val banco = Editor(documento)
+        val aplicacion = banco.aplicarPlan(plan, nombrePerfil)
+        if (!aplicacion.exito || aplicacion.omitidas.isNotEmpty()) return null
+        val nodo = banco.documento.compilar() ?: return null
+        return RevisorDeGeometria.reparos(banco.documento, nodo, perfil)
     }
 
     // ------------------------------------------------------------------ archivo
@@ -361,10 +2269,15 @@ class Editor(inicial: Documento = Documento.vacio()) {
             ultimoError = null
             return false
         }
-        if (registrarEnHistorial) {
+        if (registrarEnHistorial && !enTransaccion) {
             historial.addLast(anterior)
             recortarHistorial()
             rehechos.clear()
+            // Fuera de transacción edita la persona; dentro, el `Aplicador` ejecutando
+            // un plan. Contarlo aquí y no con una bandera en cada camino de edición es
+            // la diferencia entre que funcione siempre y que funcione hasta que alguien
+            // añada una forma nueva de mover una pieza y se le olvide marcarla.
+            edicionesAMano++
         }
         documento = nuevo
         ultimoError = null
@@ -389,6 +2302,9 @@ class Editor(inicial: Documento = Documento.vacio()) {
 
     private companion object {
         const val PROFUNDIDAD_DEL_HISTORIAL = 200
+
+        /** Las operaciones que producen cantos, y por tanto lo único fileteable. */
+        val BOOLEANAS = setOf(TipoPieza.UNION, TipoPieza.DIFERENCIA, TipoPieza.INTERSECCION)
 
         val formato = Json { prettyPrint = true; encodeDefaults = true }
 

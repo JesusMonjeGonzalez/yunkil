@@ -9,7 +9,7 @@ struct CamaraGPU {
     var frente: SIMD4<Float>
     var derecha: SIMD4<Float>
     var arriba: SIMD4<Float>
-    var params: SIMD4<Float>      // x = tan(fov/2), y = epsilon, z = escalaPasos
+    var params: SIMD4<Float>      // x = tan(fov/2), y = epsilon, z = escalaPasos, w = paralela
     var resolucion: SIMD4<Float>  // xy en píxeles
 }
 
@@ -22,6 +22,24 @@ struct CamaraOrbital {
     var azimut: Float = 0.7
     var elevacion: Float = 0.45
     var campoDeVision: Float = 45 * .pi / 180
+
+    /// Proyección paralela. En una herramienta de cotas es lo que se quiere la mitad del
+    /// tiempo: con perspectiva, dos caras del mismo tamaño se dibujan distintas y no se
+    /// puede comparar a ojo si dos agujeros están alineados.
+    var ortografica = false
+
+    /// Vistas de siempre. Los números son los de cualquier CAD, que es donde los tiene
+    /// aprendidos quien vaya a usar esto.
+    enum Vista { case planta, alzado, perfil, isometrica }
+
+    mutating func mirarDesde(_ vista: Vista) {
+        switch vista {
+        case .planta: azimut = -.pi / 2; elevacion = Self.elevacionMaxima
+        case .alzado: azimut = -.pi / 2; elevacion = 0
+        case .perfil: azimut = 0; elevacion = 0
+        case .isometrica: azimut = 0.7; elevacion = 0.45
+        }
+    }
 
     /// La elevación se detiene justo antes de los polos: cruzarlos invierte el
     /// vector «arriba» y la escena da un tumbo desconcertante.
@@ -73,6 +91,61 @@ struct CamaraOrbital {
         )
     }
 
+    /// El rayo que sale de un punto de la vista, en coordenadas normalizadas.
+    ///
+    /// Tiene que construirse **igual** que en el fragment shader generado, o señalar
+    /// daría una pieza distinta de la que se ve bajo el cursor. De ahí que viva aquí
+    /// al lado de `empaquetar`: el día que cambie el encuadre, las dos cosas están en
+    /// la misma pantalla.
+    ///
+    /// - Parameters:
+    ///   - uv: coordenadas de pantalla en `[-1, 1]`, con la Y hacia arriba.
+    ///   - aspecto: anchura partido por altura del área dibujada.
+    func rayo(uv: SIMD2<Float>, aspecto: Float) -> (origen: SIMD3<Float>, direccion: SIMD3<Float>) {
+        let base = baseOrtonormal()
+        let ndc = SIMD2<Float>(uv.x * aspecto, uv.y) * tan(campoDeVision * 0.5)
+        if ortografica {
+            // En paralelo todos los rayos van en la misma dirección y lo que cambia es de
+            // dónde salen. Es el mismo cambio que hace el shader, y tiene que ser el mismo
+            // o señalar apuntaría a un sitio distinto del que se ve.
+            let escala = ndc * distancia
+            let origen = posicion + base.derecha * escala.x + base.arriba * escala.y
+            return (origen, base.frente)
+        }
+        let direccion = simd_normalize(base.frente + base.derecha * ndc.x + base.arriba * ndc.y)
+        return (posicion, direccion)
+    }
+
+    /// Cuánto avanza una cara, en milímetros del mundo, al arrastrar el ratón.
+    ///
+    /// Es lo que convierte un arrastre en pantalla en un empujón sobre una cota. La cara
+    /// solo puede moverse a lo largo de su normal, así que se proyecta la normal sobre los
+    /// ejes de la pantalla y se toma la componente del arrastre que va en esa dirección:
+    /// una cara vista de canto no se mueve por mucho que se arrastre, que es exactamente
+    /// lo que debe pasar.
+    ///
+    /// - Parameters:
+    ///   - normal: normal de la cara, en el mundo y normalizada.
+    ///   - deltaX: recorrido del ratón en puntos, positivo hacia la derecha.
+    ///   - deltaY: recorrido del ratón en puntos, **positivo hacia abajo**, que es como
+    ///     lo entrega AppKit. Confundir este signo invierte el gesto entero.
+    ///   - distanciaAlImpacto: a qué distancia está el punto que se arrastra.
+    ///   - alturaEnPuntos: altura de la vista, para saber cuántos milímetros mide un punto.
+    func avanceDeArrastre(
+        normal: SIMD3<Float>,
+        deltaX: Float,
+        deltaY: Float,
+        distanciaAlImpacto: Float,
+        alturaEnPuntos: Float
+    ) -> Float {
+        guard alturaEnPuntos > 0 else { return 0 }
+        let base = baseOrtonormal()
+        // Lo que mide un punto de pantalla en el plano que pasa por el impacto.
+        let mmPorPunto = 2 * tan(campoDeVision * 0.5) * distanciaAlImpacto / alturaEnPuntos
+        let enPantalla = SIMD2<Float>(simd_dot(normal, base.derecha), simd_dot(normal, base.arriba))
+        return (deltaX * enPantalla.x - deltaY * enPantalla.y) * mmPorPunto
+    }
+
     /// - Parameter epsilonRelativo: umbral de impacto como fracción de la distancia
     ///   de la cámara. Fijarlo en unidades absolutas produce bordes sucios de lejos
     ///   y un gasto de pasos innecesario de cerca.
@@ -87,7 +160,9 @@ struct CamaraOrbital {
                 tan(campoDeVision * 0.5),
                 max(distancia * epsilonRelativo, 1e-4),
                 escalaPasos,
-                0
+                // w: media anchura de la vista en paralelo, o 0 con perspectiva. Va aquí y
+                // no en un booleano aparte porque el hueco ya existía en el empaquetado.
+                ortografica ? distancia : 0
             ),
             resolucion: SIMD4<Float>(resolucion.x, resolucion.y, 0, 0)
         )

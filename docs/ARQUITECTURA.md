@@ -78,6 +78,20 @@ anchura y producen un acuerdo redondeado.
 `Simetria` (espejo respecto a un plano por el origen), `Repeticion` (copias
 lineales, tope duro de 64).
 
+**`AcuerdoLocal`** — la misma booleana, pero con el acuerdo **limitado a un sitio**: es el
+filete de un canto concreto. La anchura de la mezcla se multiplica por una caída centrada
+en un punto, así que dentro de esa esfera hay redondeo y fuera la booleana sigue exacta.
+La ventaja sobre un kernel de contornos es que no hace falta topología: la arista se elige
+apuntando con el cursor y el punto de impacto es el centro.
+
+Es el único nodo del kernel que **no es 1-Lipschitz**, y eso está medido en vez de
+escondido: el mínimo suave no se aparta del exacto más de `k/4` y la caída `(1−t²)²` tiene
+pendiente máxima 1,54, así que el gradiente sube 0,385 por unidad de `fusion/radio`. La
+prueba mide 1,383 en el peor caso frente al 1,385 que predice la cuenta. De ahí sale
+`ShaderGenerado.pasoSeguro`, que el renderizador multiplica por el paso del gobernador: un
+filete pequeño no cuesta casi nada y solo se paga cuando la mezcla es tan ancha como su
+alcance.
+
 ### Restricciones deliberadas
 
 - **La escala no uniforme está prohibida.** Deformaría el campo y las distancias
@@ -247,9 +261,16 @@ Requisitos: macOS con Xcode completo seleccionado (`xcode-select -s
 ```bash
 ./scripts/construir-mac.sh debug      # o release
 ./scripts/instalar.sh                 # copia a /Applications
-./gradlew :core:jvmTest               # 48 tests del núcleo, sin GPU
-./gradlew :core:volcarParidad && ./build/paridad core/build/paridad
+./gradlew :core:jvmTest               # 295 tests del núcleo, sin GPU
+./gradlew :core:volcarParidad && ./build/paridad core/build/paridad   # 22 casos
+swiftc -O tools/rayo/main.swift apps/mac/Sources/Camara.swift -o build/rayo && ./build/rayo
+./gradlew :core:banco                 # peticiones reales contra el modelo local
 ```
+
+`tools/rayo` verifica lo que ninguna prueba del núcleo puede: que el rayo que sale del
+cursor se construya **igual** que en el shader. Un signo invertido ahí no da error, da otra
+pieza. `:core:banco` no falla la build a propósito: que un modelo local acierte 6 de 8 es
+un dato, no un error de compilación.
 
 ### Qué cubren los tests
 
@@ -267,11 +288,25 @@ Requisitos: macOS con Xcode completo seleccionado (`xcode-select -s
 
 ## 10. Límites conocidos
 
-- **No hay bocetos 2D.** Solo se componen primitivas. Es la carencia más grande
-  frente a Fusion 360 o Shapr3D, y limita qué piezas se pueden hacer.
-- **No hay exportación.** Ni STL ni 3MF: falta el contorneado dual.
-- **No hay analizador de fabricación.** Es el subproyecto 2 y es el producto.
-- **Solo macOS.** El núcleo compila para iOS pero no hay app de iPad.
-- **Sin gizmos en el viewport.** Mover una pieza es teclear números.
+*Revisado el 6 de agosto de 2026. Este apartado se había quedado desfasado: decía que no
+había bocetos 2D, ni exportación, ni analizador, y las tres cosas existen desde el 4 de
+agosto.*
+
+- **Hay perfiles 2D** (`kernel.Perfil2D`, `EXTRUSION`, `REVOLUCION`, `BARRIDO`) pero **no
+  hay solucionador de restricciones**: se acota con números y se pega con imanes. Es una
+  decisión, no una carencia pendiente.
+- **Hay exportación STL con certificado** (`malla/Exportacion.kt`) y analizador de
+  fabricación (`fabricacion/Analizador.kt`). Falta 3MF y quedan las auto-intersecciones.
+- **Solo macOS.** El núcleo compila para iOS pero no hay app de iPad, y antes de abrirla
+  hay que resolver el despacho por tiles o el vigilante de la GPU mata la aplicación.
+- **Sin gizmos dibujados**, pero sí hay manipulación directa: pinchar selecciona
+  (`doc/Picking.kt`), ⌘ y arrastrar empuja la cara (`doc/Asas.kt`), y el clic derecho lleva
+  filete, apoyo en el plato, aislar y sacar del grupo.
+- **La malla importada no se pinta.** El viewport enseña su envolvente porque el generador
+  de MSL emite matemática pura y un campo horneado necesita una textura 3D. La evaluación
+  en CPU sí es el campo real, así que restar, ahuecar, analizar y exportar son exactos.
+- **Un `AcuerdoLocal` no es 1-Lipschitz.** Está medido (1,383 de gradiente peor con la
+  mezcla tan ancha como su alcance) y compensado con el paso seguro que publica el
+  generador, no escondido.
 - Kotlin 2.0.21 avisa de que Xcode 26.6 supera su versión probada (máx. 16.0).
   Compila y funciona, pero es el primer sospechoso si algo raro aparece en iOS.

@@ -17,24 +17,14 @@ object ModelosDemo {
 
     fun soporte(): Documento {
         val base = pieza(
-            TipoPieza.VACIADO, "Base hueca", "grosor" to 3f,
-            hijos = listOf(
-                pieza(
-                    TipoPieza.CAJA, "Base",
-                    "anchura" to 90f, "altura" to 16f, "profundidad" to 60f, "redondeo" to 4f,
-                ),
-            ),
+            TipoPieza.CAJA, "Base",
+            "anchura" to 90f, "altura" to 10f, "profundidad" to 60f, "redondeo" to 4f,
         )
 
         val respaldo = pieza(
-            TipoPieza.VACIADO, "Respaldo hueco", "grosor" to 3f,
+            TipoPieza.CAJA, "Respaldo",
+            "anchura" to 90f, "altura" to 60f, "profundidad" to 10f, "redondeo" to 4f,
             transform = Transform(translation = Vec3(0f, 22f, -22f)),
-            hijos = listOf(
-                pieza(
-                    TipoPieza.CAJA, "Respaldo",
-                    "anchura" to 90f, "altura" to 60f, "profundidad" to 16f, "redondeo" to 4f,
-                ),
-            ),
         )
 
         val refuerzos = pieza(
@@ -51,19 +41,9 @@ object ModelosDemo {
             ),
         )
 
-        val taladros = pieza(
-            TipoPieza.REPETICION, "Taladros", "paso" to 26f, eje = Axis.X, cuenta = 3,
-            hijos = listOf(
-                pieza(TipoPieza.CILINDRO, "Taladro", "radio" to 3.2f, "altura" to 40f),
-            ),
-        )
-
         val raiz = pieza(
-            TipoPieza.DIFERENCIA, "Soporte", "fusion" to 0f,
-            hijos = listOf(
-                pieza(TipoPieza.UNION, "Cuerpo", "fusion" to 5f, hijos = listOf(base, respaldo, refuerzos)),
-                taladros,
-            ),
+            TipoPieza.UNION, "Soporte", "fusion" to 5f,
+            hijos = listOf(base, respaldo, refuerzos),
         )
 
         return Documento(raiz = raiz, seleccionado = raiz.id)
