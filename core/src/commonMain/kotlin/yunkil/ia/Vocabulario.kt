@@ -103,6 +103,7 @@ Operaciones disponibles (campo "op"):
 {"op":"patron","objetivo":"placa","estandar":"VESA_100"}
 {"op":"pared","objetivo":"caja"}
 {"op":"filete","objetivo":"respaldo","contra":"base","radio":3}
+{"op":"filete","objetivo":"tapa","radio":1.5}
 {"op":"apoyar","objetivo":"soporte","cara":"abajo"}
 {"op":"seleccionar","objetivo":"base"}
 {"op":"asentar"}
@@ -220,6 +221,7 @@ ${Estandares.resumenParaModelo()}
 14. PARA REDONDEAR UN CANTO CONCRETO USA "filete" CON "contra", NO "fusion" DE LA
    UNION, que redondea **todos** los encuentros a la vez. Nombra las dos piezas que
    forman el canto y no intentes dar una coordenada: el punto lo mide Yunkil.
+   Para redondear los cantos **de una sola pieza**, "filete" sin "contra".
 15. PARA DECIDIR CÓMO SE IMPRIME USA "apoyar", NO "girar" CON GRADOS. Di qué cara va
    contra el plato y Yunkil la gira y la baja. Calcular el giro a mano falla de signo
    casi siempre, y una pieza apoyada en la cara equivocada sale llena de soportes

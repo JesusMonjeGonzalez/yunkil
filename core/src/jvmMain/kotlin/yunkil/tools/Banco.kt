@@ -128,7 +128,7 @@ private fun casos(): List<Caso> = listOf(
 )
 
 fun main(args: Array<String>) {
-    val endpoint = normalizarEndpoint(args.getOrNull(0) ?: ENDPOINT_POR_DEFECTO)
+    val endpoint = normalizarUrl(args.getOrNull(0) ?: ENDPOINT_POR_DEFECTO)
     val modelo = args.getOrNull(1) ?: MODELO_POR_DEFECTO
     // Un modelo es estocástico: a lo largo de tres tiradas la fila de geometría hizo
     // 6 → 7 → 6 con el mismo prompt y el mismo modelo. Ocho números de una sola
@@ -210,7 +210,7 @@ fun main(args: Array<String>) {
             rondasGastadas += ronda
 
             if (respuesta == null) {
-                println("SIN RESPUESTA — ${ultimoFalloDeRed ?: "motivo desconocido"}")
+                println("SIN RESPUESTA — ${motivoDelUltimoFallo ?: "motivo desconocido"}")
                 continue
             }
             respondieron++
@@ -309,90 +309,11 @@ private fun pedir(
     peticion: String,
     /** Rondas anteriores: lo que respondió el modelo y lo que se midió de ello. */
     conversacion: List<Pair<String, String>> = emptyList(),
-): String? {
-    val sistema = editor.instruccionesParaModelo(null, peticion)
-    val cuerpo = buildJsonObject {
-        put("model", JsonPrimitive(modelo))
-        put("temperature", JsonPrimitive(0.2))
-        put("max_tokens", JsonPrimitive(8000))
-        put("stream", JsonPrimitive(false))
-        put(
-            "messages",
-            buildJsonArray {
-                add(
-                    buildJsonObject {
-                        put("role", JsonPrimitive("system"))
-                        put("content", JsonPrimitive(sistema))
-                    },
-                )
-                add(
-                    buildJsonObject {
-                        put("role", JsonPrimitive("user"))
-                        put("content", JsonPrimitive(peticion))
-                    },
-                )
-                for ((suyo, medido) in conversacion) {
-                    add(
-                        buildJsonObject {
-                            put("role", JsonPrimitive("assistant"))
-                            put("content", JsonPrimitive(suyo))
-                        },
-                    )
-                    add(
-                        buildJsonObject {
-                            put("role", JsonPrimitive("user"))
-                            put("content", JsonPrimitive(medido))
-                        },
-                    )
-                }
-            },
-        )
-    }
-
-    val peticionHttp = HttpRequest.newBuilder(URI.create(endpoint))
-        .header("Content-Type", "application/json")
-        // Sin límite corto: un modelo local con razonamiento tarda medio minuto largo, y
-        // cortarlo antes contaría como fallo del modelo algo que es del cliente.
-        .timeout(Duration.ofMinutes(6))
-        .POST(HttpRequest.BodyPublishers.ofString(cuerpo.toString()))
-        .build()
-
-    // Por qué no basta con devolver `null`: un banco es un instrumento de medida, y
-    // este se tragaba la excepción, así que «el modelo no supo» y «el stack está
-    // caído» salían por pantalla escritos igual —SIN RESPUESTA— ocho veces seguidas.
-    // Con 0/8 delante, lo primero que uno hace es dudar del modelo. El motivo se
-    // guarda aquí y se imprime junto al caso.
-    return try {
-        val respuesta = cliente.send(peticionHttp, HttpResponse.BodyHandlers.ofString())
-        if (respuesta.statusCode() !in 200..299) {
-            ultimoFalloDeRed = "HTTP ${respuesta.statusCode()}: ${respuesta.body().take(160)}"
-            return null
-        }
-        val contenido = json.parseToJsonElement(respuesta.body())
-            .jsonObject["choices"]?.jsonArray?.firstOrNull()
-            ?.jsonObject?.get("message")?.jsonObject?.get("content")?.jsonPrimitive?.content
-        if (contenido == null) {
-            ultimoFalloDeRed = "respuesta sin contenido: ${respuesta.body().take(160)}"
-        }
-        contenido
-    } catch (e: Exception) {
-        ultimoFalloDeRed = "${e::class.simpleName}: ${e.message ?: "sin mensaje"}"
-        null
-    }
-}
-
-/** El motivo del último fallo de red, para no confundirlo con un fallo del modelo. */
-private var ultimoFalloDeRed: String? = null
-
-/**
- * Acepta tanto la base del stack como la ruta completa.
- *
- * La documentación de arriba dice «contra 127.0.0.1:9292» y el argumento se usaba
- * tal cual, así que pasar la base daba **405 Method Not Allowed** en las ocho
- * peticiones. Con la salida anterior —«SIN RESPUESTA» ocho veces— eso se lee como
- * un modelo que no sabe responder, y lo único que pasaba es que faltaba la ruta.
- */
-private fun normalizarEndpoint(url: String): String {
-    val limpia = url.trimEnd('/')
-    return if (URI.create(limpia).path.isNullOrEmpty()) "$limpia/v1/chat/completions" else limpia
-}
+): String? = pedirAlModelo(
+    cliente = cliente,
+    endpoint = endpoint,
+    modelo = modelo,
+    sistema = editor.instruccionesParaModelo(null, peticion),
+    usuario = peticion,
+    conversacion = conversacion,
+)

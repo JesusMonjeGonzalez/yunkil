@@ -4,6 +4,7 @@ import yunkil.doc.Documento
 import yunkil.doc.Editor
 import yunkil.ia.*
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -140,5 +141,81 @@ class AceptarParcialTest {
         val r = e.aplicarParte(plan, listOf(1))
         assertTrue(r.exito, r.resumen)
         assertFalse("Nueva" in e.nombres(), e.nombres().toString())
+    }
+}
+
+/**
+ * «Redondéale los cantos» a una pieza suelta.
+ *
+ * Lo destapó el banco de hilo: pedido sobre una tapa cilíndrica, el modelo emite un
+ * `filete` de la pieza contra sí misma —es lo único que el vocabulario le deja decir—
+ * y antes eso se rechazaba con «aquí no se juntan dos piezas», sin redondeo y sin que
+ * el usuario se enterara de por qué.
+ */
+class FileteDePiezaSueltaTest {
+
+    private fun editorCon(tipo: String): Pair<Editor, String> {
+        val e = Editor(Documento.vacio())
+        e.aplicarPlan(PlanDeModelado(operaciones = listOf(Crear(tipo = tipo, nombre = "Pieza"))))
+        return e to e.filas().first { it.nombre == "Pieza" }.id
+    }
+
+    private fun redondeoDe(e: Editor, id: String): Float =
+        e.parametrosDe(id).first { it.clave == "redondeo" }.valor
+
+    @Test
+    fun `un cilindro suelto redondea sus propios cantos`() {
+        val (e, id) = editorCon("CILINDRO")
+        // El booleano que devuelve el editor significa «hay que recompilar el shader»,
+        // no «salió bien» —cambiar un uniforme no recompila nada—. La señal de éxito es
+        // `ultimoError`, que es la que usa el `Aplicador`.
+        e.filetearEntre(id, null, 1.5f)
+        assertEquals(null, e.ultimoError)
+        assertEquals(1.5f, redondeoDe(e, id))
+    }
+
+    @Test
+    fun `y tambien cuando el modelo lo escribe contra si mismo`() {
+        // Es literalmente lo que emitió el modelo local: objetivo y contra, la misma pieza.
+        val (e, id) = editorCon("CAJA")
+        val plan = PlanDeModelado(
+            operaciones = listOf(Filete(objetivo = id, contra = id, radio = 2f)),
+        )
+        val r = e.aplicarPlan(plan)
+        assertTrue(r.exito, r.resumen)
+        assertEquals(2f, redondeoDe(e, id))
+    }
+
+    @Test
+    fun `una pieza sin cantos redondeables lo dice con su nombre`() {
+        // La esfera no tiene parámetro de redondeo y no cuelga de ningún booleano.
+        val (e, id) = editorCon("ESFERA")
+        assertFalse(e.filetearEntre(id, null, 1f))
+        assertContains(e.ultimoError ?: "", "Pieza")
+    }
+
+    @Test
+    fun `filetear el encuentro entre dos piezas sigue haciendo lo de siempre`() {
+        // El camino que ya funcionaba no puede cambiar: con `contra` apuntando a OTRA
+        // pieza se sigue redondeando el canto del booleano, no los cantos propios.
+        val e = Editor(Documento.vacio())
+        e.aplicarPlan(
+            PlanDeModelado(
+                operaciones = listOf(
+                    Crear(tipo = "CAJA", alias = "a", nombre = "A"),
+                    Crear(tipo = "CAJA", alias = "b", nombre = "B"),
+                    Colocar(objetivo = "b", referencia = "a"),
+                    Filete(objetivo = "a", contra = "b", radio = 1.5f),
+                ),
+            ),
+        )
+        val a = e.filas().first { it.nombre == "A" }.id
+        // 2 mm es el redondeo con el que nace una CAJA. Que siga ahí es lo que se
+        // comprueba: el filete de encuentro no toca los cantos propios de la pieza.
+        assertEquals(2f, redondeoDe(e, a), "no debía tocar el redondeo propio de A")
+        assertTrue(
+            e.filas().any { it.tipo == "UNION" || it.tipo == "DIFERENCIA" },
+            "el filete de encuentro tiene que vivir en el booleano",
+        )
     }
 }

@@ -48,3 +48,14 @@ tasks.register<JavaExec>("volcarParidad") {
     mainClass.set("yunkil.tools.VolcadoKt")
     args(layout.buildDirectory.dir("paridad").get().asFile.absolutePath)
 }
+
+tasks.register<JavaExec>("bancoDeHilo") {
+    group = "verification"
+    description = "Mide si la memoria de la conversación mejora la corrección del segundo turno"
+    val compilacion = kotlin.jvm().compilations.getByName("main")
+    dependsOn(compilacion.compileTaskProvider)
+    classpath(compilacion.output.allOutputs, compilacion.runtimeDependencyFiles)
+    mainClass.set("yunkil.tools.BancoDeHiloKt")
+    // Igual que `banco`: que el hilo aporte 2 de 6 es un dato, no un error de build.
+    isIgnoreExitValue = true
+}

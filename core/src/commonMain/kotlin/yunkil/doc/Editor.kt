@@ -434,8 +434,26 @@ class Editor(inicial: Documento = Documento.vacio()) {
      */
     fun filetearEntre(objetivoId: String, contraId: String?, radio: Float): Boolean {
         if (!radio.isFinite() || radio <= 0f) return rechazar("El radio del filete tiene que ser positivo")
+
+        // «Redondéale los cantos» a una pieza suelta no habla de ningún encuentro entre
+        // dos sólidos: habla de los cantos que la primitiva ya tiene, y esos son un
+        // parámetro suyo. Antes esto se rechazaba con «aquí no se juntan dos piezas», y
+        // el banco lo cazó: pedido a una tapa cilíndrica, el modelo emitía un `filete`
+        // de la pieza contra sí misma —la única forma de decirlo con el vocabulario que
+        // se le enseña— y no pasaba nada, ni con aviso.
+        //
+        // Va antes de buscar el booleano y no en el `else` de su fallo, porque una pieza
+        // que además cuelga de una UNION tiene las dos lecturas, y la que pidió el
+        // usuario es esta: los cantos *de esta pieza*.
+        if (contraId == null || contraId == objetivoId) {
+            val propio = redondeoPropioDe(objetivoId)
+            if (propio != null) return fijarParametro(objetivoId, propio, radio)
+        }
+
         val booleano = booleanoQueJunta(objetivoId)
-            ?: return rechazar("Aquí no se juntan dos piezas: no hay canto que filetear")
+            ?: return rechazar(
+                "«${nombreDe(objetivoId)}» no tiene cantos redondeables ni se junta con otra pieza",
+            )
 
         if (contraId == null) {
             // Todos los encuentros de ese booleano: es el acuerdo global.
@@ -466,6 +484,19 @@ class Editor(inicial: Documento = Documento.vacio()) {
         val alcance = if (seSolapan) max(comun.radius, radio * 2f) else radio * 2f
 
         return filetear(booleano, centro.x, centro.y, centro.z, alcance, radio)
+    }
+
+    /**
+     * El parámetro con el que esta pieza redondea sus propios cantos, si tiene alguno.
+     *
+     * Sale del catálogo de `TipoPieza` y no de una lista escrita aquí, por lo mismo que
+     * el esquema que ve el modelo: una primitiva nueva con canto redondeable funcionaría
+     * sola, y una que lo pierda dejaría de ofrecerlo sin que nadie tenga que acordarse.
+     */
+    private fun redondeoPropioDe(id: String): String? {
+        val pieza = documento.buscar(id) ?: return null
+        return pieza.tipo.parametrosCon(pieza.forma)
+            .firstOrNull { it.clave == "redondeo" }?.clave
     }
 
     /**
