@@ -36,6 +36,19 @@ final class Renderizador: NSObject, MTKViewDelegate {
     private var huellaCompilada: String = ""
     private var alturaPlato: Float = 0
 
+    /// Los campos horneados de las mallas importadas, ya en la GPU.
+    ///
+    /// Antes de esto el shader pintaba la **caja envolvente** de un STL importado: la
+    /// función bandera del producto —coge un STL cualquiera y devuélvelo imprimible y
+    /// comprobado— se presentaba como un ladrillo gris, aunque el núcleo evaluara el
+    /// campo exacto para restar, ahuecar, analizar y exportar.
+    ///
+    /// Se reconstruyen solo cuando cambia la huella, que es cuando cambia el número o
+    /// el tamaño de las rejillas: son hasta 28 MB por malla y subirlos en cada
+    /// fotograma tiraría el frame rate al suelo sin cambiar un píxel.
+    private var texturasDeCampo: [MTLTexture] = []
+    private var huellaDeLasTexturas: String = ""
+
     var camara = CamaraOrbital()
     private let gobernador: GobernadorDeRecursos
 
@@ -76,6 +89,7 @@ final class Renderizador: NSObject, MTKViewDelegate {
         encuadrar()
         actualizarAlturaPlato()
         compilar()
+        actualizarTexturasDeCampo()
         actualizarUniforms()
     }
 
@@ -88,6 +102,9 @@ final class Renderizador: NSObject, MTKViewDelegate {
     ///   `memcpy`; añadir una pieza llega como `true` y cuesta una compilación.
     func sincronizar(recompilar: Bool) {
         if recompilar || pipeline == nil { compilar() }
+        // Después de compilar: la lista de campos la publica el shader recién generado,
+        // y pedirla antes daría la del anterior.
+        actualizarTexturasDeCampo()
         actualizarUniforms()
         actualizarAlturaPlato()
     }
@@ -120,6 +137,62 @@ final class Renderizador: NSObject, MTKViewDelegate {
             ultimoError = "\(error)"
             NSLog("Yunkil: el shader no compiló — %@", "\(error)")
         }
+    }
+
+    /// Sube los campos horneados a texturas 3D, si han cambiado.
+    ///
+    /// `r32Float` y no `r16Float` aunque ocupe el doble: en media precisión el paso
+    /// alrededor de los 100 mm es de 0,06 mm, y el trazado compara la distancia contra
+    /// un épsilon más fino que eso. Con `half`, una pieza importada grande se dibujaría
+    /// con la superficie temblando.
+    ///
+    /// El filtrado lineal lo hace el muestreador del shader, y es exactamente la misma
+    /// trilineal que hace `CampoDeMalla.evaluar` en CPU. De eso depende que lo que se
+    /// ve sea lo que se exporta.
+    private func actualizarTexturasDeCampo() {
+        let campos = editor.camposDelShader
+        guard editor.huellaTopologica != huellaDeLasTexturas || texturasDeCampo.count != campos.count
+        else { return }
+
+        var nuevas: [MTLTexture] = []
+        for campo in campos {
+            let descriptor = MTLTextureDescriptor()
+            descriptor.textureType = .type3D
+            descriptor.pixelFormat = .r32Float
+            descriptor.width = Int(campo.nx)
+            descriptor.height = Int(campo.ny)
+            descriptor.depth = Int(campo.nz)
+            descriptor.usage = .shaderRead
+            descriptor.storageMode = .shared
+
+            guard let textura = dispositivo.makeTexture(descriptor: descriptor) else {
+                NSLog("Yunkil: no se pudo crear la textura del campo (%dx%dx%d)",
+                      campo.nx, campo.ny, campo.nz)
+                return
+            }
+
+            // En bloque y no elemento a elemento: siete millones de muestras cruzando el
+            // puente de una en una tardan segundos, y la aplicación se congelaría al
+            // abrir cada STL. `comoDatos` vive en `appleMain` y hace una sola copia.
+            let datos = campo.comoDatos()
+            let filaEnBytes = Int(campo.nx) * MemoryLayout<Float>.size
+            let capaEnBytes = filaEnBytes * Int(campo.ny)
+            datos.withUnsafeBytes { crudo in
+                guard let base = crudo.baseAddress else { return }
+                textura.replace(
+                    region: MTLRegionMake3D(0, 0, 0, Int(campo.nx), Int(campo.ny), Int(campo.nz)),
+                    mipmapLevel: 0,
+                    slice: 0,
+                    withBytes: base,
+                    bytesPerRow: filaEnBytes,
+                    bytesPerImage: capaEnBytes
+                )
+            }
+            nuevas.append(textura)
+        }
+
+        texturasDeCampo = nuevas
+        huellaDeLasTexturas = editor.huellaTopologica
     }
 
     private func actualizarUniforms() {
@@ -194,6 +267,14 @@ final class Renderizador: NSObject, MTKViewDelegate {
             escena.planoR.x = semiladoDelPlano()
         }
         codificador.setFragmentBytes(&escena, length: MemoryLayout<EscenaGPU>.stride, index: 2)
+        // Los campos horneados, en el orden que publicó el generador. Sin mallas
+        // importadas esta lista está vacía, el shader no declara texturas y esto no
+        // hace nada: el camino de siempre no cambia.
+        if !texturasDeCampo.isEmpty {
+            codificador.setFragmentTextures(
+                texturasDeCampo, range: 0..<texturasDeCampo.count
+            )
+        }
         codificador.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         codificador.endEncoding()
 

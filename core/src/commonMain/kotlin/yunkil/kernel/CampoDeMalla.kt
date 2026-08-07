@@ -123,6 +123,15 @@ class CampoDeMalla(
         caja.min.x, caja.min.y, caja.min.z, caja.max.x, caja.max.y, caja.max.z,
     )
 
+    // El campo, para quien tenga que subirlo a la GPU. Se expone en bruto y de solo
+    // lectura en vez de copiarlo: son hasta 28 MB y el renderizador lo va a volcar a
+    // una textura tal cual.
+    val anchoEnCeldas: Int get() = nx
+    val altoEnCeldas: Int get() = ny
+    val fondoEnCeldas: Int get() = nz
+    val bandaDelCampo: Float get() = banda
+    val muestras: FloatArray get() = valores
+
     companion object {
 
         /** Tope de celdas. A 192³ son siete millones: unos 28 MB y unos segundos. */

@@ -51,6 +51,7 @@ import yunkil.malla.LectorStl
 import yunkil.malla.leerArchivo
 import yunkil.malla.anadirLinea
 import yunkil.malla.Exportador
+import yunkil.msl.CampoEnShader
 import yunkil.msl.MslGenerator
 import kotlin.math.PI
 import kotlin.math.abs
@@ -140,6 +141,16 @@ class Editor(inicial: Documento = Documento.vacio()) {
      * locales. Lo decide el generador porque es quien sabe qué nodos hay.
      */
     val pasoSeguroDelShader: Float get() = shaderActual.pasoSeguro
+
+    /**
+     * Los campos horneados que el shader lee como textura, en orden de enlace.
+     *
+     * El renderizador los sube a texturas 3D. Se le da la lista del generador y no se
+     * le deja recorrer el documento por su cuenta: el orden es el del preorden del
+     * árbol, y si lo dedujera por otro camino el día que cambie la emisión se pintaría
+     * una malla con los datos de otra sin que nada lo dijera.
+     */
+    val camposDelShader: List<CampoEnShader> get() = shaderActual.campos
     val seleccionado: String? get() = documento.seleccionado
     val puedeDeshacer: Boolean get() = historial.isNotEmpty()
     val puedeRehacer: Boolean get() = rehechos.isNotEmpty()

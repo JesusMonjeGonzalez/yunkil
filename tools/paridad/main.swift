@@ -11,10 +11,19 @@ import Metal
 
 let TOLERANCIA_POR_DEFECTO: Float = 1e-4
 
+/// Un campo horneado del caso: dimensiones de la rejilla y sus muestras en crudo.
+struct CampoDelCaso {
+    let nx: Int
+    let ny: Int
+    let nz: Int
+    let muestras: [Float]
+}
+
 struct Caso {
     let nombre: String
     let fuente: String
     let uniforms: [Float]
+    let campos: [CampoDelCaso]
     let puntos: [SIMD4<Float>]
     let esperado: [Float]
 }
@@ -45,6 +54,27 @@ func leerCaso(directorio: URL) throws -> Caso {
         fallar("\(directorio.lastPathComponent): se anunciaron \(numeroUniforms) uniforms y llegaron \(uniforms.count)")
     }
 
+    // Los campos horneados. Es el único nodo cuyo shader lee una textura en vez de
+    // hacer aritmética, así que sin esto la paridad no cubriría la malla importada —y
+    // se estaría afirmando que el viewport y el exportador coinciden sobre una
+    // geometría que nadie ha comparado—.
+    guard let cabeceraC = lineas.next(), cabeceraC.hasPrefix("campos ") else {
+        fallar("\(directorio.lastPathComponent): falta la cabecera de campos")
+    }
+    let numeroCampos = Int(cabeceraC.dropFirst("campos ".count))!
+    var campos: [CampoDelCaso] = []
+    for i in 0..<numeroCampos {
+        guard let fila = lineas.next() else { fallar("faltan las cotas del campo \(i)") }
+        let d = fila.split(separator: " ").map { Int($0)! }
+        let crudo = try Data(contentsOf: directorio.appendingPathComponent("campo\(i).bin"))
+        let esperadas = d[0] * d[1] * d[2]
+        guard crudo.count == esperadas * 4 else {
+            fallar("\(directorio.lastPathComponent): campo\(i).bin tiene \(crudo.count / 4) muestras y la rejilla pide \(esperadas)")
+        }
+        let muestras = crudo.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        campos.append(CampoDelCaso(nx: d[0], ny: d[1], nz: d[2], muestras: muestras))
+    }
+
     guard let cabeceraP = lineas.next(), cabeceraP.hasPrefix("puntos ") else {
         fallar("\(directorio.lastPathComponent): falta la cabecera de puntos")
     }
@@ -66,6 +96,7 @@ func leerCaso(directorio: URL) throws -> Caso {
         nombre: directorio.lastPathComponent,
         fuente: fuente,
         uniforms: uniforms,
+        campos: campos,
         puntos: puntos,
         esperado: esperado
     )
@@ -73,25 +104,34 @@ func leerCaso(directorio: URL) throws -> Caso {
 
 /// Núcleo de cómputo que llama al `yk_map` generado. Se añade al vuelo para no
 /// contaminar el shader que consume la aplicación real.
-let NUCLEO_DE_COMPROBACION = """
+func nucleoDeComprobacion(campos: Int) -> String {
+    // Con campos, el `yk_map` generado lleva el array de texturas en la firma, así que
+    // el núcleo tiene que declararlo y pasárselo. Sin campos se emite exactamente el
+    // texto de siempre: los 24 casos que ya pasaban no cambian ni un carácter.
+    let param = campos > 0
+        ? ",\n                       array<texture3d<float>, \(campos)> yk_campos [[texture(0)]]"
+        : ""
+    let arg = campos > 0 ? ", yk_campos" : ""
+    return """
 
 kernel void yk_paridad(constant float *u          [[buffer(0)]],
                        device const float4 *pts   [[buffer(1)]],
                        device float *salida       [[buffer(2)]],
-                       uint id [[thread_position_in_grid]]) {
-    salida[id] = yk_map(pts[id].xyz, u);
+                       uint id [[thread_position_in_grid]]\(param)) {
+    salida[id] = yk_map(pts[id].xyz, u\(arg));
 }
 
 kernel void yk_poda(constant float *u          [[buffer(0)]],
                     device const float4 *pts   [[buffer(1)]],
                     device float *salida       [[buffer(2)]],
-                    uint id [[thread_position_in_grid]]) {
+                    uint id [[thread_position_in_grid]]\(param)) {
     // La marcha podada nunca puede exagerar: si devolviera más que el campo real,
     // el trazado se pasaría de largo. Se comprueba contra `yk_map` en la GPU para
     // que el desvío de punto flotante sea el mismo en las dos llamadas.
-    salida[id] = yk_marcha(pts[id].xyz, u);
+    salida[id] = yk_marcha(pts[id].xyz, u\(arg));
 }
 """
+}
 
 guard CommandLine.arguments.count >= 2 else {
     fallar("uso: paridad <directorio-de-casos> [tolerancia]")
@@ -128,7 +168,7 @@ for dir in directorios {
     let biblioteca: MTLLibrary
     do {
         biblioteca = try dispositivo.makeLibrary(
-            source: caso.fuente + NUCLEO_DE_COMPROBACION,
+            source: caso.fuente + nucleoDeComprobacion(campos: caso.campos.count),
             options: nil
         )
     } catch {
@@ -160,6 +200,35 @@ for dir in directorios {
     let bufS2 = dispositivo.makeBuffer(
         length: n * MemoryLayout<Float>.stride, options: .storageModeShared)!
 
+    // Las texturas del caso, con el mismo formato y el mismo filtro que usa la
+    // aplicación: si el arnés muestreara distinto, estaría comprobando un shader que
+    // nadie ejecuta.
+    var texturas: [MTLTexture] = []
+    for campo in caso.campos {
+        let d = MTLTextureDescriptor()
+        d.textureType = .type3D
+        d.pixelFormat = .r32Float
+        d.width = campo.nx
+        d.height = campo.ny
+        d.depth = campo.nz
+        d.usage = .shaderRead
+        d.storageMode = .shared
+        guard let t = dispositivo.makeTexture(descriptor: d) else {
+            fallar("\(caso.nombre): no se pudo crear la textura \(campo.nx)x\(campo.ny)x\(campo.nz)")
+        }
+        campo.muestras.withUnsafeBytes { bytes in
+            t.replace(
+                region: MTLRegionMake3D(0, 0, 0, campo.nx, campo.ny, campo.nz),
+                mipmapLevel: 0,
+                slice: 0,
+                withBytes: bytes.baseAddress!,
+                bytesPerRow: campo.nx * MemoryLayout<Float>.size,
+                bytesPerImage: campo.nx * campo.ny * MemoryLayout<Float>.size
+            )
+        }
+        texturas.append(t)
+    }
+
     // Devuelve el error del command buffer en vez de dejarlo dentro: cuando esto se
     // extrajo a una función para poder lanzar también el shader podado, el `cmd` que
     // se consultaba después se quedó fuera de alcance y el arnés dejó de compilar.
@@ -171,6 +240,7 @@ for dir in directorios {
         enc.setBuffer(bufU, offset: 0, index: 0)
         enc.setBuffer(bufP, offset: 0, index: 1)
         enc.setBuffer(salida, offset: 0, index: 2)
+        if !texturas.isEmpty { enc.setTextures(texturas, range: 0..<texturas.count) }
         let ancho = min(pipeline.maxTotalThreadsPerThreadgroup, 256)
         enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: ancho, height: 1, depth: 1))

@@ -45,7 +45,36 @@ data class ShaderGenerado(
      * árbol; el renderizador solo lo aplica.
      */
     val pasoSeguro: Float = 1f,
+    /**
+     * Los campos horneados que el shader lee como textura, en el orden en que hay que
+     * enlazarlos.
+     *
+     * Va aquí y no lo busca el renderizador por su cuenta porque el orden es el del
+     * preorden del árbol, que lo conoce el generador: si el renderizador lo dedujera
+     * recorriendo el documento por su lado, el día que cambie el orden de emisión se
+     * pintaría una malla con los datos de otra y nada lo diría.
+     *
+     * Lista vacía es el caso normal. Y entonces el shader se emite **exactamente igual
+     * que antes**, sin parámetro de texturas: así los 24 casos del arnés de paridad no
+     * cambian ni una letra y esta función no puede haber roto lo que ya funcionaba.
+     */
+    val campos: List<CampoEnShader> = emptyList(),
 )
+
+/** Un campo horneado listo para subir a una textura 3D. */
+data class CampoEnShader(
+    val nx: Int,
+    val ny: Int,
+    val nz: Int,
+    /** `nx · ny · nz` distancias en milímetros, en orden `(k · ny + j) · nx + i`. */
+    val muestras: FloatArray,
+) {
+    // `data class` con un array compara por identidad y avisa. Aquí es lo que se
+    // quiere: dos campos son el mismo si son el mismo objeto, y comparar 7 millones
+    // de floats en cada refresco de la interfaz sería absurdo.
+    override fun equals(other: Any?) = this === other
+    override fun hashCode() = muestras.size * 31 + nx
+}
 
 /**
  * Traduce un árbol SDF a Metal Shading Language.
@@ -70,7 +99,20 @@ class MslGenerator {
      * renderizador no lo recompilaría porque la huella no cambió. Esta marca es la
      * que fuerza la recompilación: si la fuente cambia, la huella también.
      */
-    private val VERSION_DEL_GENERADOR = "v10"
+    private val VERSION_DEL_GENERADOR = "v11"
+
+    /**
+     * Las ocho esquinas de una celda, en el mismo orden que las lee
+     * `CampoDeMalla.evaluar`: c000, c100, c010, c110, c001, c101, c011, c111.
+     *
+     * El orden no es cosmético. Las mezclas se hacen en ese orden y en punto flotante
+     * la suma no es asociativa, así que reordenarlas separaría el resultado del de la
+     * CPU justo en los decimales que comprueba el arnés de paridad.
+     */
+    private val ESQUINAS = listOf(
+        intArrayOf(0, 0, 0), intArrayOf(1, 0, 0), intArrayOf(0, 1, 0), intArrayOf(1, 1, 0),
+        intArrayOf(0, 0, 1), intArrayOf(1, 0, 1), intArrayOf(0, 1, 1), intArrayOf(1, 1, 1),
+    )
 
     fun generar(raiz: SdfNode): ShaderGenerado {
         // El preorden es el orden canónico: el de los uniforms y el de las cajas.
@@ -81,13 +123,24 @@ class MslGenerator {
         }
         val totalEscalares = orden.sumOf { it.escalares.size }
 
+        // Los campos horneados, numerados también por preorden. Se numeran una vez y se
+        // consultan desde los dos cuerpos: si cada cuerpo los fuera registrando por su
+        // cuenta, el podado —que no baja por las ramas que descarta— asignaría índices
+        // distintos y pintaría una malla con los datos de otra.
+        val campos = orden.filterIsInstance<CampoDeMalla>()
+        val indiceDeCampo = HashMap<SdfNode, Int>().apply {
+            campos.forEachIndexed { i, n -> put(n, i) }
+        }
+
         val cuerpo = StringBuilder()
         val estado = Estado()
-        val resultado = emitir(raiz, "p", cuerpo, estado, podar = false, indiceDeCaja, totalEscalares)
+        val resultado =
+            emitir(raiz, "p", cuerpo, estado, podar = false, indiceDeCaja, totalEscalares, indiceDeCampo)
 
         val cuerpoPodado = StringBuilder()
         val estadoPodado = Estado()
-        val resultadoPodado = emitir(raiz, "p", cuerpoPodado, estadoPodado, podar = true, indiceDeCaja, totalEscalares)
+        val resultadoPodado =
+            emitir(raiz, "p", cuerpoPodado, estadoPodado, podar = true, indiceDeCaja, totalEscalares, indiceDeCampo)
 
         // Las cajas de los nodos viajan al final del buffer, en el orden del preorden:
         // primero todos los escalares —que es el orden que ya comprueba la paridad— y
@@ -96,23 +149,83 @@ class MslGenerator {
         val baseDeCajas = totalEscalares
         val numeroDeNodos = orden.size
 
-        val fuente = buildString {
-            append(PRELUDIO)
-            append("\nfloat yk_map(float3 p, constant float *u) {\n")
-            append(cuerpo)
-            append("    return $resultado;\n}\n")
-            append("\nfloat yk_marcha(float3 p, constant float *u) {\n")
-            append(cuerpoPodado)
-            append("    return $resultadoPodado;\n}\n")
-            append(RAYMARCHER)
-        }
+        val fuente = conCampos(
+            buildString {
+                append(PRELUDIO)
+                append("\nfloat yk_map(float3 p, constant float *u) {\n")
+                append(cuerpo)
+                append("    return $resultado;\n}\n")
+                append("\nfloat yk_marcha(float3 p, constant float *u) {\n")
+                append(cuerpoPodado)
+                append("    return $resultadoPodado;\n}\n")
+                append(RAYMARCHER)
+            },
+            campos.size,
+        )
 
         return ShaderGenerado(
             fuente = fuente,
             numeroDeUniforms = totalEscalares + 6 * numeroDeNodos,
-            huellaTopologica = VERSION_DEL_GENERADOR + huellaDe(raiz),
+            // Las mallas entran en la huella por su número **y su tamaño en celdas**: dos
+            // documentos con la misma forma de árbol pero rejillas distintas necesitan
+            // shaders distintos, porque las dimensiones van literales en el muestreo.
+            huellaTopologica = VERSION_DEL_GENERADOR + huellaDe(raiz) +
+                campos.joinToString("") { "T${it.anchoEnCeldas}x${it.altoEnCeldas}x${it.fondoEnCeldas}" },
             pasoSeguro = pasoSeguroDe(raiz),
+            campos = campos.map {
+                CampoEnShader(it.anchoEnCeldas, it.altoEnCeldas, it.fondoEnCeldas, it.muestras)
+            },
         )
+    }
+
+    /**
+     * Añade el parámetro de texturas a todas las firmas y llamadas, si hace falta.
+     *
+     * Se hace por sustitución sobre el shader ya montado y **solo cuando hay campos**.
+     * Con cero campos la fuente sale sin tocar, byte a byte igual que antes de que esto
+     * existiera: los 24 casos del arnés de paridad no se mueven, y eso convierte «no he
+     * roto nada» en un hecho comprobable en vez de una promesa.
+     *
+     * Va por sustitución y no con dos plantillas porque una segunda copia del
+     * raymarcher se queda desactualizada el día que alguien toque la primera, y ese es
+     * el tipo de divergencia que aquí no se nota hasta que la pantalla dibuja mal.
+     */
+    private fun conCampos(fuente: String, cuantos: Int): String {
+        if (cuantos == 0) return fuente
+        val tipo = "array<texture3d<float>, $cuantos>"
+        return fuente
+            // 1. Las definiciones de las dos funciones generadas. Van primero para que
+            //    la regla 4 no las confunda con una llamada.
+            .replace(
+                "float yk_map(float3 p, constant float *u)",
+                "float yk_map(float3 p, constant float *u, $tipo yk_campos)",
+            )
+            .replace(
+                "float yk_marcha(float3 p, constant float *u)",
+                "float yk_marcha(float3 p, constant float *u, $tipo yk_campos)",
+            )
+            // 2. Firmas de las funciones auxiliares del raymarcher.
+            .replace(
+                "constant float *u, constant YkEscena &escena",
+                "constant float *u, $tipo yk_campos, constant YkEscena &escena",
+            )
+            // 3. La entrada del fragmento, que es la única que declara el enlace real.
+            .replace(
+                "constant YkEscena &escena [[buffer(2)]])",
+                "constant YkEscena &escena [[buffer(2)]],\n" +
+                    "                                        $tipo yk_campos [[texture(0)]])",
+            )
+            // 4. Las llamadas. Por expresión regular y no por texto literal: la primera
+            //    versión sustituía «yk_map(p, u)» tal cual y se dejó fuera la llamada de
+            //    la marcha de grosor de pared de la sección, que pasa otro punto
+            //    (`yk_map(p - normal * avance, u)`). No compiló, que es la forma buena
+            //    de enterarse, pero solo porque el arnés de paridad lo intentó: en la
+            //    aplicación el error habría acabado en el registro y la pantalla se
+            //    habría quedado con el shader anterior.
+            .replace(Regex("""(yk_map|yk_marcha)\(([^;\n]*?), u\)""")) {
+                "${it.groupValues[1]}(${it.groupValues[2]}, u, yk_campos)"
+            }
+            .replace(", u, escena)", ", u, yk_campos, escena)")
     }
 
     private class Estado {
@@ -143,6 +256,7 @@ class MslGenerator {
         podar: Boolean,
         indiceDeCaja: Map<SdfNode, Int>,
         baseDeCajas: Int,
+        indiceDeCampo: Map<SdfNode, Int>,
         cursorYaReservado: Boolean = false,
     ): String {
         // El bloque de este nodo empieza donde estaba el cursor... salvo cuando la
@@ -182,14 +296,49 @@ class MslGenerator {
             }
 
             is CampoDeMalla -> {
-                // Envolvente, no la pieza: ver `CampoDeMalla.escalares`. Se emite desde
-                // uniforms como todo lo demás, así que cuando llegue la textura este
-                // nodo no desalinea el buffer ni obliga a recompilar por mover la caja.
+                // La caja envolvente sigue emitiéndose desde uniforms como todo lo demás
+                // —así mover la malla no recompila— y encima de ella va el muestreo de la
+                // textura. Fuera de la caja se devuelve la distancia a la caja más la
+                // banda, que es exactamente lo que hace `CampoDeMalla.evaluar`: una cota
+                // **inferior** de la distancia real, que es lo que hace seguro avanzar a
+                // saltos. Dentro, trilineal, que es lo que da el filtro lineal de Metal.
                 val v = e.nuevaVariable("mm")
-                sb.append("${sangria}float3 ${v}c = (float3(${u(0)}, ${u(1)}, ${u(2)}) + float3(${u(3)}, ${u(4)}, ${u(5)})) * 0.5f;\n")
-                sb.append("${sangria}float3 ${v}h = (float3(${u(3)}, ${u(4)}, ${u(5)}) - float3(${u(0)}, ${u(1)}, ${u(2)})) * 0.5f;\n")
-                sb.append("${sangria}float3 ${v}q = abs($punto - ${v}c) - ${v}h;\n")
-                sb.append("${sangria}float $d = length(max(${v}q, float3(0.0f))) + min(max(${v}q.x, max(${v}q.y, ${v}q.z)), 0.0f);\n")
+                val campo = indiceDeCampo[nodo] ?: 0
+                sb.append("${sangria}float3 ${v}lo = float3(${u(0)}, ${u(1)}, ${u(2)});\n")
+                sb.append("${sangria}float3 ${v}hi = float3(${u(3)}, ${u(4)}, ${u(5)});\n")
+                sb.append("${sangria}float3 ${v}q = max(${v}lo - $punto, $punto - ${v}hi);\n")
+                sb.append("${sangria}float ${v}f = length(max(${v}q, float3(0.0f))) + min(max(${v}q.x, max(${v}q.y, ${v}q.z)), 0.0f);\n")
+                sb.append("${sangria}float $d;\n")
+                sb.append("${sangria}if (${v}f > 0.0f) { $d = ${v}f + ${nodo.bandaDelCampo}f; } else {\n")
+                // Trilineal **a mano**, con lecturas sin filtrar.
+                //
+                // El filtro lineal del muestreador de Metal hace esta misma cuenta y es
+                // una línea en vez de doce, pero interpola con pesos de precisión
+                // reducida: medido contra la CPU daba 3,8 µm de desvío en el 10 % de los
+                // puntos del arnés. Son 3,8 µm y no se ven en la pantalla, y aun así se
+                // descarta, porque el invariante del proyecto es que `evaluar` y el MSL
+                // dan **el mismo número**. Un invariante con asterisco deja de servir
+                // para lo que existe: distinguir un fallo real del ruido de siempre.
+                //
+                // Se calca la CPU paso a paso, incluido el orden de las mezclas: en
+                // punto flotante, `(a+b)+c` y `a+(b+c)` no son lo mismo.
+                sb.append("${sangria}    float3 ${v}g = clamp(($punto - ${v}lo) / ${nodo.resolucion}f, float3(0.0f), float3(${nodo.anchoEnCeldas - 1}.0f, ${nodo.altoEnCeldas - 1}.0f, ${nodo.fondoEnCeldas - 1}.0f));\n")
+                sb.append("${sangria}    float3 ${v}b = min(floor(${v}g), float3(${nodo.anchoEnCeldas - 2}.0f, ${nodo.altoEnCeldas - 2}.0f, ${nodo.fondoEnCeldas - 2}.0f));\n")
+                sb.append("${sangria}    float3 ${v}t = ${v}g - ${v}b;\n")
+                sb.append("${sangria}    uint3 ${v}i = uint3(${v}b);\n")
+                for ((k, esquina) in ESQUINAS.withIndex()) {
+                    sb.append(
+                        "${sangria}    float ${v}c$k = yk_campos[$campo].read(${v}i + uint3(${esquina[0]}, ${esquina[1]}, ${esquina[2]})).x;\n",
+                    )
+                }
+                sb.append("${sangria}    float ${v}x0 = ${v}c0 + (${v}c1 - ${v}c0) * ${v}t.x;\n")
+                sb.append("${sangria}    float ${v}x1 = ${v}c2 + (${v}c3 - ${v}c2) * ${v}t.x;\n")
+                sb.append("${sangria}    float ${v}x2 = ${v}c4 + (${v}c5 - ${v}c4) * ${v}t.x;\n")
+                sb.append("${sangria}    float ${v}x3 = ${v}c6 + (${v}c7 - ${v}c6) * ${v}t.x;\n")
+                sb.append("${sangria}    float ${v}y0 = ${v}x0 + (${v}x1 - ${v}x0) * ${v}t.y;\n")
+                sb.append("${sangria}    float ${v}y1 = ${v}x2 + (${v}x3 - ${v}x2) * ${v}t.y;\n")
+                sb.append("${sangria}    $d = ${v}y0 + (${v}y1 - ${v}y0) * ${v}t.z;\n")
+                sb.append("${sangria}}\n")
             }
 
             is Barrido -> {
@@ -246,7 +395,7 @@ class MslGenerator {
             }
 
             is Union -> {
-                val a = emitir(nodo.a, punto, sb, e, podar, indiceDeCaja, baseDeCajas)
+                val a = emitir(nodo.a, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                 // La caja de B se comprueba y sus uniforms se reservan en el mismo
                 // paso: si la poda se cumple, la rama no se emite pero el cursor ya
                 // avanzó; si no, `emitir` entra con el cursor ya reservado.
@@ -259,17 +408,17 @@ class MslGenerator {
                     sb.append("${sangria}if ($cajaB > $a + ${u(0)}) {\n")
                     sb.append("$sangria    $d = $a;\n")
                     sb.append("${sangria}} else {\n")
-                    val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, cursorYaReservado = true)
+                    val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo, cursorYaReservado = true)
                     sb.append("$sangria    $d = yk_smin($a, $c, ${u(0)});\n")
                     sb.append("${sangria}}\n")
                 } else {
-                    val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas)
+                    val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                     sb.append("${sangria}float $d = yk_smin($a, $c, ${u(0)});\n")
                 }
             }
 
             is Diferencia -> {
-                val a = emitir(nodo.a, punto, sb, e, podar, indiceDeCaja, baseDeCajas)
+                val a = emitir(nodo.a, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                 val cajaB = if (podar) podaDeCaja(nodo.b, punto, sb, e, indiceDeCaja, baseDeCajas) else null
                 if (cajaB != null) {
                     // B está tan lejos que `-dB` no puede pasar de `a`: la resta no
@@ -278,11 +427,11 @@ class MslGenerator {
                     sb.append("${sangria}if ($cajaB > -$a + ${u(0)}) {\n")
                     sb.append("$sangria    $d = $a;\n")
                     sb.append("${sangria}} else {\n")
-                    val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, cursorYaReservado = true)
+                    val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo, cursorYaReservado = true)
                     sb.append("$sangria    $d = yk_smax($a, -$c, ${u(0)});\n")
                     sb.append("${sangria}}\n")
                 } else {
-                    val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas)
+                    val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                     sb.append("${sangria}float $d = yk_smax($a, -$c, ${u(0)});\n")
                 }
             }
@@ -291,8 +440,8 @@ class MslGenerator {
                 // La intersección es el único booleano que no se puede podar con la
                 // caja: necesita saber si B está *cerca* (dB pequeño), y la caja solo
                 // acota por abajo la distancia al sólido. Se evalúa siempre.
-                val a = emitir(nodo.a, punto, sb, e, podar, indiceDeCaja, baseDeCajas)
-                val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas)
+                val a = emitir(nodo.a, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
+                val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                 sb.append("${sangria}float $d = yk_smax($a, $c, ${u(0)});\n")
             }
 
@@ -305,7 +454,7 @@ class MslGenerator {
                     "${sangria}float ${v}k = ${u(4)} * " +
                         "yk_caida(length($punto - float3(${u(0)}, ${u(1)}, ${u(2)})), ${u(3)});\n",
                 )
-                val a = emitir(nodo.a, punto, sb, e, podar, indiceDeCaja, baseDeCajas)
+                val a = emitir(nodo.a, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                 // El acuerdo local puede podar igual que su booleana equivalente: la
                 // mezcla local nunca alcanza más lejos que `k` desde el valor de `a`.
                 val cajaB = if (podar && nodo.modo != ModoDeAcuerdo.INTERSECCION) {
@@ -324,7 +473,7 @@ class MslGenerator {
                         sb.append("${sangria}if ($comparacion) {\n")
                         sb.append("$sangria    $d = $a;\n")
                         sb.append("${sangria}} else {\n")
-                        val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, cursorYaReservado = true)
+                        val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo, cursorYaReservado = true)
                         val expresion = when (nodo.modo) {
                             ModoDeAcuerdo.UNION -> "yk_smin($a, $c, ${v}k)"
                             ModoDeAcuerdo.DIFERENCIA -> "yk_smax($a, -$c, ${v}k)"
@@ -333,7 +482,7 @@ class MslGenerator {
                         sb.append("$sangria    $d = $expresion;\n")
                         sb.append("${sangria}}\n")
                     } else {
-                        val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, cursorYaReservado = true)
+                        val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo, cursorYaReservado = true)
                         val expresion = when (nodo.modo) {
                             ModoDeAcuerdo.UNION -> "yk_smin($a, $c, ${v}k)"
                             ModoDeAcuerdo.DIFERENCIA -> "yk_smax($a, -$c, ${v}k)"
@@ -342,7 +491,7 @@ class MslGenerator {
                         sb.append("${sangria}float $d = $expresion;\n")
                     }
                 } else {
-                    val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas)
+                    val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                     val expresion = when (nodo.modo) {
                         ModoDeAcuerdo.UNION -> "yk_smin($a, $c, ${v}k)"
                         ModoDeAcuerdo.DIFERENCIA -> "yk_smax($a, -$c, ${v}k)"
@@ -361,12 +510,12 @@ class MslGenerator {
                         "${u(3)} * ${q}d.x + ${u(4)} * ${q}d.y + ${u(5)} * ${q}d.z, " +
                         "${u(6)} * ${q}d.x + ${u(7)} * ${q}d.y + ${u(8)} * ${q}d.z) * ${u(12)};\n",
                 )
-                val hijo = emitir(nodo.hijo, q, sb, e, podar, indiceDeCaja, baseDeCajas)
+                val hijo = emitir(nodo.hijo, q, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                 sb.append("${sangria}float $d = $hijo * ${u(13)};\n")
             }
 
             is Vaciado -> {
-                val hijo = emitir(nodo.hijo, punto, sb, e, podar, indiceDeCaja, baseDeCajas)
+                val hijo = emitir(nodo.hijo, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                 sb.append("${sangria}float $d = abs($hijo) - ${u(0)} * 0.5f;\n")
             }
 
@@ -378,7 +527,7 @@ class MslGenerator {
                     Axis.Z -> "float3($punto.x, $punto.y, abs($punto.z))"
                 }
                 sb.append("${sangria}float3 $q = $expr;\n")
-                val hijo = emitir(nodo.hijo, q, sb, e, podar, indiceDeCaja, baseDeCajas)
+                val hijo = emitir(nodo.hijo, q, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                 sb.append("${sangria}float $d = $hijo;\n")
             }
 
@@ -408,11 +557,11 @@ class MslGenerator {
                         val base = baseDeCajas + 6 * (indiceDeCaja[nodo.hijo] ?: 0)
                         sb.append("${sangria}float $caja = yk_caja($q, u, $base);\n")
                         sb.append("${sangria}if ($caja < $d) {\n")
-                        val hijo = emitir(nodo.hijo, q, sb, e, podar, indiceDeCaja, baseDeCajas)
+                        val hijo = emitir(nodo.hijo, q, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                         sb.append("$sangria    $d = min($d, $hijo);\n")
                         sb.append("${sangria}}\n")
                     } else {
-                        val hijo = emitir(nodo.hijo, q, sb, e, podar, indiceDeCaja, baseDeCajas)
+                        val hijo = emitir(nodo.hijo, q, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                         sb.append("${sangria}$d = min($d, $hijo);\n")
                     }
                     cursorTrasElHijo = e.cursorUniforms

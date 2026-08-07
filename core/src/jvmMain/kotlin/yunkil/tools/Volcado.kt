@@ -50,11 +50,27 @@ fun main(args: Array<String>) {
             "$nombre: el shader espera ${shader.numeroDeUniforms} uniforms pero el árbol empaqueta ${uniforms.size}"
         }
 
+        // Los campos horneados, cuando el caso lleva una malla importada. Van en
+        // binario y aparte del texto porque son millones de floats: escribirlos como
+        // decimales multiplicaría por seis el archivo y metería error de redondeo justo
+        // en los números cuya igualdad se está comprobando.
+        for ((i, campo) in shader.campos.withIndex()) {
+            File(dir, "campo$i.bin").writeBytes(
+                java.nio.ByteBuffer
+                    .allocate(campo.muestras.size * 4)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    .apply { campo.muestras.forEach { putFloat(it) } }
+                    .array(),
+            )
+        }
+
         val puntos = puntosDeMuestra(modelo)
         File(dir, "datos.txt").writeText(
             buildString {
                 appendLine("uniforms ${uniforms.size}")
                 appendLine(uniforms.joinToString(" ") { it.toString() })
+                appendLine("campos ${shader.campos.size}")
+                for (campo in shader.campos) appendLine("${campo.nx} ${campo.ny} ${campo.nz}")
                 appendLine("puntos ${puntos.size}")
                 for (p in puntos) {
                     appendLine("${p.x} ${p.y} ${p.z} ${modelo.evaluar(p)}")
@@ -193,7 +209,40 @@ private fun casos(): List<Pair<String, SdfNode>> = listOf(
     // varios hijos con acuerdo, que es exactamente la forma del demo del soporte.
     "demo_soporte" to (yunkil.doc.ModelosDemo.soporte().compilar() ?: Esfera(1f)),
     "demo_rejilla" to (yunkil.doc.ModelosDemo.rejilla().compilar() ?: Esfera(1f)),
+
+    // Malla importada. Es el único nodo cuyo shader no es aritmética sino una lectura
+    // de textura, así que es también el único donde la paridad puede romperse por algo
+    // que no está escrito en el generador: el filtro del muestreador, el redondeo de la
+    // coordenada, el orden de las capas. Nada de eso se ve leyendo el código.
+    //
+    // Y compuesta, no suelta: el caso que importa es el de verdad —un STL al que se le
+    // resta una ranura— porque ahí el campo horneado tiene que convivir con el resto
+    // del árbol y con el buffer de uniforms compartido.
+    "malla_cubo" to campoDeCubo(20f, 2f),
+    "malla_restada" to Diferencia(campoDeCubo(20f, 2f), Cilindro(4f, 40f)),
 )
+
+/**
+ * Un cubo horneado a campo, como el que sale de importar un STL.
+ *
+ * Se construye a mano y no leyendo un archivo para que el caso de paridad no dependa
+ * de que haya un STL en disco: un arnés que se cae porque falta un archivo es un arnés
+ * que alguien acaba desactivando.
+ */
+private fun campoDeCubo(lado: Float, resolucion: Float): yunkil.kernel.CampoDeMalla {
+    val h = lado * 0.5f
+    val vertices = FloatArray(8 * 3)
+    for (i in 0 until 8) {
+        vertices[i * 3] = if (i and 1 == 0) -h else h
+        vertices[i * 3 + 1] = if (i and 2 == 0) -h else h
+        vertices[i * 3 + 2] = if (i and 4 == 0) -h else h
+    }
+    val triangulos = intArrayOf(
+        0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4,
+        2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5,
+    )
+    return yunkil.kernel.CampoDeMalla.hornear(vertices, triangulos, resolucion, origen = "cubo")
+}
 
 private fun desplazada(n: SdfNode, x: Float) =
     Transformado(n, Transform(translation = Vec3(x, 0f, 0f)))

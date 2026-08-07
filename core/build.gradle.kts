@@ -59,3 +59,12 @@ tasks.register<JavaExec>("bancoDeHilo") {
     // Igual que `banco`: que el hilo aporte 2 de 6 es un dato, no un error de build.
     isIgnoreExitValue = true
 }
+
+tasks.register<JavaExec>("verMalla") {
+    group = "verification"
+    description = "Exporta un demo a STL, lo reimporta, lo hornea y dibuja las dos versiones"
+    val compilacion = kotlin.jvm().compilations.getByName("main")
+    dependsOn(compilacion.compileTaskProvider)
+    classpath(compilacion.output.allOutputs, compilacion.runtimeDependencyFiles)
+    mainClass.set("yunkil.tools.VerMallaKt")
+}
