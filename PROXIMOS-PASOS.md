@@ -1,8 +1,94 @@
 # Yunkil — próximos pasos
 
-Estado a 6 de agosto de 2026. Para cómo funciona lo que ya existe, ver
+Estado a 7 de agosto de 2026. Para cómo funciona lo que ya existe, ver
 [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md). Para qué tienen los competidores y cómo se
-hace aquí, [docs/TOP10-COMPETIDORES.md](docs/TOP10-COMPETIDORES.md).
+hace aquí, [docs/TOP10-COMPETIDORES.md](docs/TOP10-COMPETIDORES.md). El diseño de la
+tanda del 7 de agosto está en
+[docs/superpowers/specs/2026-08-07-conversacion-de-verdad-design.md](docs/superpowers/specs/2026-08-07-conversacion-de-verdad-design.md).
+
+### Hecho el 7 de agosto de 2026 — la conversación de verdad
+
+El foso declarado del producto es «conversación editable», y no había conversación:
+un campo de texto de un solo tiro que aplicaba sin preguntar, y una petición siguiente
+que nacía sin memoria de la anterior.
+
+**La propuesta se ve antes de aplicarse** (`ia/Explicacion.kt`, `PanelDePropuesta.swift`).
+`Explicacion.de(plan)` cuenta el plan en español leyendo **las operaciones**, no el
+resumen que escribe el modelo: ese resumen es una frase suya sobre lo que cree que hizo,
+y el caso que hay que cazar —el plan que dice una cosa y hace otra— es justo el que no
+distingue. Es función pura sobre el plan, así que se prueba sin documento y sin modelo.
+
+**Aceptar parcial**, con casilla por operación. La selección se cierra en las dos
+direcciones sobre el grafo «quién nombra lo que esta creó»: marcar arrastra hacia arriba
+lo que hace falta, desmarcar arrastra hacia abajo lo que quedaría huérfano. Sin lo
+segundo el aplicador **no falla**: omite en silencio, que es el modo de fallo callado
+que el resto del bucle existe para no tener. Y `reemplazar` se desactiva en una
+aceptación parcial: si el usuario descarta parte de lo que iba a sustituir el trabajo
+previo, sustituirlo igual destruiría más de lo que se acepta.
+
+La dependencia que se sigue es «nombra lo que esta creó» y no «y además lo que la colocó
+donde toca». Lo segundo sería una suposición sobre la intención, y una selección que
+arrastra cosas que el usuario no pidió es peor que una que se queda corta: lo segundo se
+ve en la lista antes de aceptar, lo primero aparece en el documento después.
+
+**La bitácora deja de ser binaria**: `Desenlace.PARCIAL` y `Asiento.rechazadas` con las
+operaciones que el usuario desmarcó, en español. Es el dato que no se puede fabricar
+sintéticamente: qué propuso el modelo que a una persona le pareció mal, con la propuesta
+delante y sin que nadie se lo preguntara.
+
+**Hilo de conversación** (`ia/Conversacion.kt`), guardado en el documento. Lleva
+**intención, no geometría** —las cotas las pone el `Contexto`, que se mide cada vez, y si
+el hilo también las llevara las dos versiones se separarían en cuanto alguien moviera una
+pieza a mano—. Se recorta a presupuesto dejando los dos últimos turnos enteros y
+colapsando los viejos, porque el sistema ya topa en 14.000 caracteres y el modelo local
+tiene 16K de contexto. Y declara si la persona ha editado a mano entre dos turnos,
+contándolo donde ya se distingue solo: fuera de transacción edita la persona, dentro el
+`Aplicador`.
+
+**El hilo no mejora la calidad, y queda medido.** `:core:bancoDeHilo` corre ocho
+correcciones de segundo turno **con hilo y sin él**, sobre el mismo documento de partida
+construido con un plan fijo. Resultado con `qwen3.6-35b-a3b`: **8/8 y 8/8**. Incluidos
+dos casos escritos a propósito para que solo la memoria pudiera resolverlos («ponle la
+tapa que te dije», «faltan los agujeros» tras haber dicho M3): el modelo los acierta
+igual por sentido común. El hilo se queda porque ahorra al usuario redescribir la pieza
+—razón de interfaz— y no porque suba el acierto. Sin la columna de control, «8/8 con
+hilo» habría parecido un éxito del hilo.
+
+**Filete de una pieza suelta**, encontrado por ese banco. «Redondéale los cantos» a una
+tapa cilíndrica hacía que el modelo emitiera `filete` de la pieza contra sí misma —lo
+único que el vocabulario le dejaba decir— y se rechazaba con «aquí no se juntan dos
+piezas», sin redondeo y sin explicación. Ahora, sin `contra` o contra sí misma, se fija
+el `redondeo` propio de la primitiva, leído del catálogo de `TipoPieza` para que una
+primitiva nueva funcione sola.
+
+**El campo dibujado en Kotlin puro** (`imagen/Vistas.kt`, `imagen/Png.kt`). Cuatro vistas
+ortográficas —frente, lado, planta, isométrica— trazando el mismo `evaluar` que es la
+verdad de referencia, sin Metal y sin mallar, montadas en un 2×2. Es el paso 2 de la hoja
+de ruta de IA: hasta ahora el revisor medía números y **nadie miraba la pieza**. Con un
+escritor de PNG sin comprimir (bloques deflate *stored*, mismo patrón que el ZIP del
+3MF), verificado decodificando lo escrito **y** con `ImageIO`, que es un juez
+independiente del codificador.
+
+Dos fallos que salieron de mirar la imagen y no de leer el código: el encuadre usaba
+`Aabb.radius` —que es el semilado por raíz de tres— así que todo salía al 58 % de su
+tamaño, y la vista de lado salía casi negra con la luz fija en el mundo, o sea una de las
+cuatro imágenes inservible. El encuadre ahora se calcula proyectando la caja sobre los
+ejes de cada vista y tomando la peor, compartido entre las cuatro para que las
+proporciones se puedan comparar.
+
+**Y dos fallos del banco de modelado**, que es un instrumento de medida y no lo estaba
+siendo: se tragaba la excepción de red, así que «el stack está caído» y «el modelo no
+supo» salían escritos igual —ocho «SIN RESPUESTA» seguidas se leen como culpa del
+modelo, y era un HTTP 405 por una URL sin ruta—. Con el diagnóstico puesto y la URL
+normalizada, la medida real de `qwen3.6-35b-a3b` es **8/8 respondió, 8/8 JSON, 8/8
+aplicado, 7/8 geometría limpia, 7/8 cumple, 6/8 a la primera**, mejor que el 5/8 y 6/8
+que traía este documento.
+
+*Pendiente de esta tanda*: el bucle visual en sí —mandarle las cuatro vistas al VLM local
+y que critique— y todo el paso 4: la previsualización fantasma en el viewport, el
+rediseño del shell y partir `App.swift` (2.163 líneas) y `Editor.kt` (2.300).
+
+384 pruebas del núcleo, 0 fallos. Paridad CPU↔GPU intacta, 24 casos en Metal real.
 
 ### Hecho el 6 de agosto de 2026 (noche)
 
