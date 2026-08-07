@@ -6,6 +6,76 @@ hace aquí, [docs/TOP10-COMPETIDORES.md](docs/TOP10-COMPETIDORES.md). El diseño
 tanda del 7 de agosto está en
 [docs/superpowers/specs/2026-08-07-conversacion-de-verdad-design.md](docs/superpowers/specs/2026-08-07-conversacion-de-verdad-design.md).
 
+## Prioridades, reordenadas el 7 de agosto de 2026
+
+Criterio: **qué frena a alguien que abre Yunkil hoy**. Con el banco marcando 7/8, la
+IA ya no es lo más urgente; la aplicación sí.
+
+1. ~~**La malla importada no se dibuja.**~~ — hecho el 7 de agosto (abajo).
+2. **La carcasa.** `App.swift` son 2.163 líneas y la interfaz es SwiftUI de serie.
+   Partirlo no es lujo: el panel de propuesta ya vive dentro de ese archivo.
+3. **Gizmo de mover y girar.** Empujar caras existe y `MOVER_PIEZA` existe, y aun así
+   colocar una pieza sigue siendo teclear números.
+4. **El defecto abierto de exportación** — agujeros a 0,5 mm y no a 0,4 ni a 0,6. El
+   exportador lo detecta y se niega a entregar, así que no hay STL roto en manos de
+   nadie, pero es una prueba con `@Ignore` esperando.
+5. **Modelo con visión nuevo + bucle visual.** Juntos: el bucle sin un VLM que aguante
+   el contexto es el paso que ya se dijo que podía decepcionar. El candidato es
+   `Qwen3-VL-8B-Instruct` Q4_K_M —~6 GB y 256K de contexto nativo, frente a los 12 GB
+   y 16K de `bonsai-ternary-27b`—, y la elección se cierra midiendo con el banco, no
+   antes.
+6. **Bocetos 2D interactivos.** La brecha real contra Shapr3D, y la más cara.
+
+Bajan de puesto la previsualización fantasma y el rediseño estético: la primera toca
+la paridad para algo que no arregla ningún hueco, y la segunda no arregla que la
+función bandera se viera mal.
+
+**Sobre modelos 3D especializados, con evidencia.** [Text2CAD-Bench](https://arxiv.org/html/2605.18430v1)
+(mayo 2026) mide Text2CAD, Text2CADQuery y CADFusion contra los LLM generales: los
+especializados sacan invalidez bajísima (2-6 %) y **geometría mucho peor** —Chamfer
+Distance ~220 frente a 44-70—, o sea código que ejecuta y está mal. Confirma la
+decisión del 4 de agosto. El mismo trabajo añade un aviso que sí toca a Yunkil: **la
+representación pesa más que el modelo**, y las representaciones de tipo *secuencia de
+comandos* miden peor que las de tipo *código* en todos los modelos probados. El DSL de
+Yunkil es una secuencia de operaciones; el contrapeso es que el banco mide 8/8 de JSON
+válido —el cuello de botella no está ahí— y que «el modelo nunca ejecuta código» es
+una decisión de producto. Queda escrito para no olvidarlo.
+
+### Hecho el 7 de agosto de 2026 (tarde) — el viewport dibuja la malla importada
+
+Arrastrabas un STL y veías una caja envolvente. `MslGenerator` emite ahora una lectura
+de textura 3D para `CampoDeMalla`, `Editor.camposDelShader` los publica en orden de
+enlace y el renderizador los sube a `r32Float`. El puente de datos vive en `appleMain`
+(`CampoParaMetal.kt`): un `FloatArray` cruza a Swift como `KotlinFloatArray`, que solo
+se lee elemento a elemento, y siete millones de llamadas al puente congelarían la
+aplicación al abrir cada STL.
+
+**Con cero mallas el shader sale byte a byte idéntico al de antes**, sin parámetro de
+texturas. Hay una prueba que lo ata, y es lo que convierte «no he roto los 24 casos de
+paridad» en un hecho comprobable en vez de una promesa.
+
+**La trilineal se hace a mano**, con lecturas sin filtrar. Con `sample()` el arnés midió
+**3,8 µm** de desvío contra la CPU en el 10 % de los puntos: el filtro de Metal
+interpola con pesos de precisión reducida. Son 3,8 µm, no se ven, y aun así se
+descartó: un invariante con asterisco deja de servir para lo que existe, que es
+distinguir un fallo real del ruido de siempre. Con las ocho lecturas y las mezclas en
+el mismo orden que la CPU —en punto flotante la suma no es asociativa— el desvío baja a
+**3,81e-06**, el mismo orden que una esfera.
+
+El arnés cubre ahora `malla_cubo` y `malla_restada`, este último con el campo
+conviviendo con el resto del árbol y el buffer de uniforms compartido. Y encontró un
+fallo por el camino: la sustitución que añade el array de texturas a las llamadas era
+literal y se dejó fuera `yk_map(p - normal * avance, u)`, la marcha de grosor de pared
+de la sección. No compiló —la forma buena de enterarse—, pero solo porque el arnés lo
+intentó: en la aplicación el error habría ido al registro y la pantalla se habría
+quedado con el shader anterior.
+
+`./gradlew :core:verMalla` cierra la cadena con una imagen: exporta un demo a STL
+(210.552 triángulos), lo relee de disco, lo hornea a 162×108×108 y dibuja las dos
+versiones. Salen iguales salvo el redondeo de arista que el campo ya documenta.
+
+392 pruebas, 26 casos de paridad en Metal real, peor desvío global 3,05e-05.
+
 ### Hecho el 7 de agosto de 2026 — la conversación de verdad
 
 El foso declarado del producto es «conversación editable», y no había conversación:
