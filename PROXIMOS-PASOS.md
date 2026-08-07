@@ -6,6 +6,85 @@ hace aquí, [docs/TOP10-COMPETIDORES.md](docs/TOP10-COMPETIDORES.md). El diseño
 tanda del 7 de agosto está en
 [docs/superpowers/specs/2026-08-07-conversacion-de-verdad-design.md](docs/superpowers/specs/2026-08-07-conversacion-de-verdad-design.md).
 
+## El modelo local: medido, y el techo que lo decide *(7 de agosto de 2026)*
+
+### Los cuatro candidatos, sobre los mismos 12 casos
+
+| | Memoria | Cumple | A la primera | Ritmo |
+|---|---|---|---|---|
+| `qwen3.5-9b` | 6,3 GiB | 8/12 | 7/12 | rápido, con desbocadas de ~4 min |
+| `qwen3.6-27b` denso | 17,6 GiB | 8/12 | 7/12 | ~20-28 s/petición |
+| `qwen3.6-35b-a3b` | 20,8 GiB | **10/12** | 7/12 | ~10 s/petición |
+
+**El 27B denso queda descartado**: mismo acierto que el 9B con 2,6× la memoria y el
+doble de lento. Dominado en las tres columnas.
+
+**Los tres empatan en «a la primera» (7/12).** El 35B no acierta más de entrada: se
+separa porque **aprovecha mejor las rondas de corrección**. La diferencia entre modelos
+no está en cuánto 3D saben, está en el bucle — que es código nuestro. Es el dato que
+más manda en la estrategia: invertir en el revisor rinde más que cambiar de modelo.
+
+### Por qué el 35B no puede ser el modelo por defecto
+
+El techo real de la máquina es **`iogpu.wired_limit_mb = 24576`, o sea 24 GiB**, y
+subirlo congela macOS (ver la nota de presupuesto de RAM). Las cuentas:
+
+| | GiB |
+|---|---|
+| Pesos del 35B | 20,8 |
+| KV a 32K con `q4_0` | ~1,5-2 |
+| **Total** | **~22,5** de 24 |
+
+Queda **algo más de 1 GiB**, y ese GiB no está libre: **Yunkil es una aplicación
+Metal** y compite por el mismo pozo —el raymarcher, el drawable, y desde hoy las
+texturas 3D de las mallas importadas, hasta 28 MB cada una—.
+
+Y el golpe definitivo es el bucle visual, que es lo siguiente que se va a construir y
+**necesita los dos modelos residentes a la vez**:
+
+```
+35B (20,8) + Qwen3-VL-8B (6,6) = 27,4 GiB  →  no cabe en 24
+ 9B ( 6,3) + Qwen3-VL-8B (6,6) = 12,9 GiB  →  holgado
+```
+
+Con el 35B habría que descargar y recargar 20,8 GiB en cada vuelta del bucle, y la
+carga en frío está medida: **21 segundos**.
+
+**Conclusión:** el 35B se queda donde ya estaba en el stack —perfil manual para una
+pieza difícil, cerrando lo demás—. El modelo del producto es el 9B, y su déficit se
+cubre con arneses, no con más parámetros.
+
+## Siguiente paso: arneses duros sobre el 9B
+
+La idea, del usuario: **tomarle la mano al 9B en vez de cambiarlo**. Los datos la
+respaldan —el empate en «a la primera» dice que el margen está en el bucle— y los
+cuatro fallos del 9B están nombrados uno a uno:
+
+| Caso que falla | Cómo se cae | Arnés |
+|---|---|---|
+| 3 · oreja de rack | **NO SE APLICÓ**: «"Oreja" no tiene contorno; usa "desplazamiento"» | Traducir `punto` → `desplazamiento` cuando no hay contorno, en vez de tirar el plan entero |
+| 7 · base de Raspberry Pi | **JSON RECHAZADO tras 3 rondas** | Rescatar el JSON truncado: quedarse con las operaciones completas |
+| 5 · soporte de móvil | **1 arista abierta tras 3 rondas** | **Bug del mallador, no del modelo.** Familia del defecto abierto de exportación |
+| 12 · gancho de puerta | **NO CUMPLE** | Semántico: fallan los tres modelos. Ninguno entiende que «colgar de una puerta» es rodearla |
+
+Los cuatro arneses a construir, en orden:
+
+1. **Rescate de JSON truncado.** `Interprete.extraerJson` casa llaves desde la primera
+   `{`; cuando el modelo se desboca y topa con el presupuesto de tokens, la respuesta
+   se corta a mitad y la profundidad nunca vuelve a cero, así que devuelve `null` y se
+   tira el plan **aunque dentro hubiera seis operaciones completas y buenas**. Quedarse
+   con el prefijo válido es seguro porque el usuario ve la propuesta antes de aplicarla.
+2. **`punto` sin contorno cae a `desplazamiento`**, con aviso, en vez de rechazar.
+3. **Freno del desbocamiento**: presupuesto de tokens más ajustado en local y detección
+   de repetición. Dos peticiones de 4 minutos por caso no compran nada.
+4. **Post-condición de cotas explícitas.** El más ambicioso y el que más paga: si la
+   petición dice «60 × 40 × 25 mm», eso es un hecho comprobable. Se extrae de la
+   petición, se mide la pieza y si no cuadra se emite un `acotar` —la operación ya
+   existe—. Es exactamente el fallo del caso 1 del 35B, que salió 76 × 38,6 × 56.
+
+Si los arneses funcionan, el 9B debería ponerse en 10-11/12 sin cambiar de modelo y sin
+salir de 13 GiB con el VLM residente al lado. Se mide con el mismo banco.
+
 ## Prioridades, al 7 de agosto de 2026
 
 Criterio fijado por el usuario: **primero que la IA genere piezas correctas y que el

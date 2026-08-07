@@ -34,6 +34,29 @@ internal var motivoDelUltimoFallo: String? = null
     private set
 
 /**
+ * La clave de OpenCode Go, del mismo sitio del que la lee la aplicación.
+ *
+ * Se lee aquí y no se pide por argumento para que la clave **no acabe en el historial
+ * del intérprete de órdenes** ni en una captura de pantalla del banco. Es el mismo
+ * archivo y el mismo campo que usa `OpenCodeCredential` en Swift; si un día cambia de
+ * sitio, cambia en los dos lados a la vez o el banco deja de medir en silencio.
+ *
+ * Devuelve `null` sin ruido si no hay credenciales: medir contra la nube es opcional.
+ */
+private fun claveDeOpenCode(): String? = try {
+    val ruta = java.io.File(System.getProperty("user.home"), ".local/share/opencode/auth.json")
+    if (!ruta.exists()) null
+    else {
+        val raiz = jsonDelCliente.parseToJsonElement(ruta.readText()).jsonObject
+        val proveedor = raiz["opencode-go"]?.jsonObject
+        if (proveedor?.get("type")?.jsonPrimitive?.content != "api") null
+        else proveedor["key"]?.jsonPrimitive?.content
+    }
+} catch (e: Exception) {
+    null
+}
+
+/**
  * Acepta tanto la base del stack como la ruta completa del endpoint.
  *
  * La documentación de los bancos enseña «127.0.0.1:9292» y el argumento se usaba tal
@@ -42,7 +65,14 @@ internal var motivoDelUltimoFallo: String? = null
  */
 internal fun normalizarUrl(url: String): String {
     val limpia = url.trimEnd('/')
-    return if (URI.create(limpia).path.isNullOrEmpty()) "$limpia/v1/chat/completions" else limpia
+    // Ya es el endpoint completo: no se toca.
+    if (limpia.endsWith("/chat/completions")) return limpia
+    // Termina en la versión de la API —`.../v1`, como la base de OpenCode Go— así que
+    // solo falta la ruta del método.
+    if (limpia.endsWith("/v1")) return "$limpia/chat/completions"
+    // Y si no hay ruta ninguna, es la base de un stack local.
+    if (URI.create(limpia).path.isNullOrEmpty()) return "$limpia/v1/chat/completions"
+    return limpia
 }
 
 /**
@@ -100,8 +130,15 @@ internal fun pedirAlModelo(
         )
     }
 
-    val peticion = HttpRequest.newBuilder(URI.create(endpoint))
+    val constructor = HttpRequest.newBuilder(URI.create(endpoint))
         .header("Content-Type", "application/json")
+    // La clave solo se busca cuando el endpoint no es local. Un stack en 127.0.0.1 no
+    // pide autorización, y mandarla igualmente significaría leer un fichero de
+    // credenciales para nada en el caso normal.
+    if (!endpoint.contains("127.0.0.1") && !endpoint.contains("localhost")) {
+        claveDeOpenCode()?.let { constructor.header("Authorization", "Bearer $it") }
+    }
+    val peticion = constructor
         // Sin límite corto: un modelo local con razonamiento tarda medio minuto largo, y
         // cortarlo antes contaría como fallo del modelo algo que es del cliente.
         .timeout(Duration.ofMinutes(6))
