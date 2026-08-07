@@ -321,6 +321,32 @@ data class Filete(
  * modelo de lenguaje puede tomar bien: sabe perfectamente cuál es la cara plana grande de
  * lo que acaba de diseñar, aunque no sepa en qué cuaternión se traduce eso.
  */
+/**
+ * Añade un nervio de refuerzo en el encuentro de dos piezas.
+ *
+ * Es la pieza que evita que una escuadra impresa se parta por la esquina, y es la que
+ * un modelo de lenguaje no sabe construir: exige un triángulo rectángulo colocado en
+ * el plano que forman las dos piezas, con la hipotenusa hacia fuera, y ahí falla en
+ * los tres pasos —el plano, el giro y el sitio—. Puesto a intentarlo contra el banco,
+ * el modelo local emitió una escuadra en L pelada y la llamó «nervio integrado».
+ *
+ * El plano lo deduce Yunkil de dónde están las dos piezas. Lo único que se dice es
+ * cuáles se refuerzan, y opcionalmente cuánto sube y cuánto engorda.
+ */
+@Serializable
+@SerialName("nervio")
+data class Nervio(
+    val objetivo: String,
+    /** La otra pieza del encuentro. */
+    val contra: String,
+    /** Cateto del triángulo, en milímetros. Omitido, un tercio de la pieza menor. */
+    val tamano: Float = 0f,
+    /** Espesor del nervio. Omitido, el doble del grosor mínimo del perfil activo. */
+    val grosor: Float = 0f,
+    val alias: String? = null,
+    override val nota: String? = null,
+) : Operacion
+
 @Serializable
 @SerialName("apoyar")
 data class Apoyar(

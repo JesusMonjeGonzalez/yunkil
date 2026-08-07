@@ -238,6 +238,24 @@ class Aplicador(
             }
         }
 
+        is Nervio -> conObjetivo(op.objetivo) { objetivo ->
+            val contra = resolver(op.contra)
+            if (contra == null) {
+                "no se sabe qué es «${op.contra}»"
+            } else {
+                val problema = intentar {
+                    editor.ponerNervio(objetivo, contra, op.tamano, op.grosor, perfil.nombre)
+                }
+                if (problema == null) {
+                    editor.ultimoNervio?.let { nuevo ->
+                        creadas.add(nuevo)
+                        op.alias?.let { alias[it] = nuevo }
+                    }
+                }
+                problema
+            }
+        }
+
         is Apoyar -> conObjetivo(op.objetivo) { objetivo ->
             intentar { editor.apoyarCaraEnElPlato(objetivo, op.cara.name) }
         }

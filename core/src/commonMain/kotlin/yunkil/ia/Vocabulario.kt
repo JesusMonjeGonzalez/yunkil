@@ -20,7 +20,7 @@ object Vocabulario {
     val OPERACIONES = listOf(
         "crear", "envolver", "fijar", "mover", "girar", "escalar", "acotar",
         "renombrar", "eliminar", "duplicar", "colocar", "alinear", "perfil", "taladro", "pared", "asentar",
-        "seleccionar", "patron", "filete", "apoyar",
+        "seleccionar", "patron", "filete", "apoyar", "nervio",
     )
 
     /** Cotas de cada familia de contorno, leídas del propio catálogo. */
@@ -104,6 +104,7 @@ Operaciones disponibles (campo "op"):
 {"op":"pared","objetivo":"caja"}
 {"op":"filete","objetivo":"respaldo","contra":"base","radio":3}
 {"op":"filete","objetivo":"tapa","radio":1.5}
+{"op":"nervio","objetivo":"base","contra":"respaldo"}
 {"op":"apoyar","objetivo":"soporte","cara":"abajo"}
 {"op":"seleccionar","objetivo":"base"}
 {"op":"asentar"}
@@ -128,9 +129,8 @@ PRINCIPIOS DE MODELADO. De oficio, valen para cualquier pieza que se vaya a fabr
   - UN SOLO CUERPO. Todo lo que la pieza tiene que llevar consigo tiene que estar
      tocándose. Dos masas separadas en el aire son dos piezas, y al imprimir la de arriba
      se cae. Si una parte no llega a la otra, alárgala o acércala; no la dejes flotando.
-  - LA MASA VA DONDE ESTÁ EL ESFUERZO. Un soporte en voladizo necesita un refuerzo (una
-     escuadra, un nervio) en el ángulo interior. Un agujero necesita material alrededor:
-     al menos dos veces el diámetro de pared, o la pieza rompe por ahí.
+  - LA MASA VA DONDE ESTÁ EL ESFUERZO. Todo ángulo que aguante carga lleva "nervio". Un
+     agujero necesita al menos dos diámetros de material alrededor, o rompe por ahí.
   - LOS CANTOS VIVOS SE ROMPEN Y SE CLAVAN. Todo canto exterior que una mano vaya a
      tocar lleva "filete". Un radio de 1 a 3 mm basta y cambia por completo cómo se
      siente la pieza. Los cantos interiores redondeados además reparten la tensión.

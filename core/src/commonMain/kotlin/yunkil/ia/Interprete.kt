@@ -221,6 +221,7 @@ object Interprete {
         is Asentar -> "asentar"
         is Filete -> "filete de ${op.radio} mm en ${op.objetivo}" +
             (op.contra?.let { " contra $it" } ?: "")
+        is Nervio -> "nervio entre ${op.objetivo} y ${op.contra}"
         is Apoyar -> "apoyar ${op.objetivo} por ${op.cara.etiqueta}"
         is Seleccionar -> "seleccionar ${op.objetivo}"
     }

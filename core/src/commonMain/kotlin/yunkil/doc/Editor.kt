@@ -1356,6 +1356,178 @@ class Editor(inicial: Documento = Documento.vacio()) {
         private set
 
     /**
+     * Añade un nervio triangular en el encuentro de dos piezas.
+     *
+     * Es la operación que evita que una escuadra impresa se parta por la esquina, y la
+     * que un modelo de lenguaje no sabe construir: exige un triángulo rectángulo en el
+     * plano que forman las dos piezas, con los catetos siguiendo a cada una y la
+     * hipotenusa hacia fuera. Son tres decisiones —el plano, el giro y el sitio— y
+     * falla en las tres. Puesto a intentarlo contra el banco, el modelo local devolvió
+     * una escuadra en L pelada llamándola «nervio integrado».
+     *
+     * Aquí las tres las toma el núcleo mirando dónde están las dos piezas:
+     *
+     * - **El plano** es el que forman los dos ejes en los que las piezas se separan; el
+     *   espesor va por el eje que comparten, que es el que ambas ocupan a la vez.
+     * - **La esquina** es el centro de la zona donde sus envolventes se solapan.
+     * - **La dirección de cada cateto** apunta hacia el cuerpo de cada pieza, medido
+     *   desde esa esquina.
+     */
+    fun ponerNervio(
+        objetivoId: String,
+        contraId: String,
+        tamano: Float = 0f,
+        grosor: Float = 0f,
+        nombrePerfil: String? = null,
+    ): Boolean {
+        if (objetivoId == contraId) return rechazar("Un nervio necesita dos piezas distintas")
+        val a = documento.cotasEnMundoDe(objetivoId)
+            ?: return rechazar("No se pueden medir las cotas de $objetivoId")
+        val b = documento.cotasEnMundoDe(contraId)
+            ?: return rechazar("No se pueden medir las cotas de $contraId")
+
+        val comun = a.intersect(b)
+        // La separación se mide eje a eje y **no** preguntándole a `intersect` si el
+        // resultado es válido: cuando dos cajas no se cruzan, `intersect` devuelve un
+        // punto degenerado en vez de una caja vacía —está escrito así a propósito, para
+        // que nada se invierta—, y con eso la comprobación de solape daba siempre que
+        // sí. El nervio se creaba entre dos piezas a 200 mm una de otra.
+        val hueco = maxOf(
+            maxOf(a.min.x - b.max.x, b.min.x - a.max.x),
+            maxOf(a.min.y - b.max.y, b.min.y - a.max.y),
+            maxOf(a.min.z - b.max.z, b.min.z - a.max.z),
+        )
+        if (hueco > 0f) {
+            return rechazar(
+                "«${nombreDe(objetivoId)}» y «${nombreDe(contraId)}» no se tocan: " +
+                    "júntalas antes de reforzar la esquina",
+            )
+        }
+
+        // El espesor va por el eje que las dos piezas comparten más, que en una escuadra
+        // es la profundidad de la chapa. Los otros dos forman el plano del triángulo.
+        val solape = comun.size
+        val ejeDelEspesor = when {
+            solape.x >= solape.y && solape.x >= solape.z -> 0
+            solape.y >= solape.z -> 1
+            else -> 2
+        }
+        val plano = (0..2).filter { it != ejeDelEspesor }
+
+        val perfil = PerfilFabricacion.porNombre(nombrePerfil ?: "") ?: PerfilFabricacion.PREDETERMINADO
+        // Sin grosor pedido, el doble del mínimo: el mínimo *rellena* la pared pero un
+        // nervio existe justamente para aguantar esfuerzo, y a una capa no aguanta nada.
+        val espesor = if (grosor > 0f) grosor else perfil.grosorMinimoPared * 2f
+
+        val esquina = comun.center
+        val centroA = a.center
+        val centroB = b.center
+
+        // Cuánto se aparta cada pieza de la esquina en cada eje del plano. El cateto
+        // sigue a la que más se aparta: es la que el nervio tiene que acompañar.
+        fun brazo(eje: Int): Pair<Float, Float> {
+            val da = componente(centroA, eje) - componente(esquina, eje)
+            val db = componente(centroB, eje) - componente(esquina, eje)
+            val mayor = if (abs(da) >= abs(db)) da else db
+            val alcance = maxOf(abs(da) * 2f, abs(db) * 2f)
+            return (if (mayor >= 0f) 1f else -1f) to alcance
+        }
+
+        val (dirU, alcanceU) = brazo(plano[0])
+        val (dirV, alcanceV) = brazo(plano[1])
+        // Sin tamaño pedido, un tercio del brazo más corto: un nervio que llega hasta el
+        // final deja de ser refuerzo y se convierte en una pared, y encima tapa lo que
+        // la escuadra tenía que dejar libre.
+        val lado = if (tamano > 0f) tamano else maxOf(minOf(alcanceU, alcanceV) / 3f, espesor * 2f)
+        if (lado < perfil.detalleMinimo) {
+            return rechazar("Un nervio de ${redondeado(lado)} mm no llega a existir con esa boquilla")
+        }
+
+        val abierta = enTransaccion
+        if (!abierta) abrirTransaccion()
+
+        // El nervio cuelga del padre común, no de una de las dos piezas: es material
+        // nuevo que se une al conjunto, y meterlo dentro de una de ellas lo dejaría
+        // fuera si esa pieza acaba dentro de una DIFERENCIA.
+        val padre = documento.padreDe(objetivoId) ?: documento.raiz.id
+        anadir(TipoPieza.EXTRUSION.name, padre)
+        ultimoError?.let { return rechazarNervio(abierta, it) }
+        val nervio = seleccionado ?: return rechazarNervio(abierta, "el nervio no se pudo identificar")
+
+        renombrar(nervio, "Nervio")
+        fijarParametro(nervio, "altura", espesor)
+
+        // El contorno vive en el plano del perfil; el mapeo a mundo lo fija el giro que
+        // se aplica debajo. `signoDelPerfil` dice, para cada eje del plano, con qué signo
+        // llega la coordenada del contorno al mundo.
+        val (ejeU, signoU) = mapaDelPerfil(ejeDelEspesor, plano[0])
+        val (ejeV, signoV) = mapaDelPerfil(ejeDelEspesor, plano[1])
+        val pu = dirU * lado * signoU
+        val pv = dirV * lado * signoV
+        fijarPuntosDelPerfil(nervio, listOf(0f, 0f, pu, 0f, 0f, pv))
+        ultimoError?.let { return rechazarNervio(abierta, it) }
+
+        val giro = when (ejeDelEspesor) {
+            0 -> Vec3(0f, 0f, -90f)
+            1 -> Vec3.ZERO
+            else -> Vec3(90f, 0f, 0f)
+        }
+        if (giro != Vec3.ZERO) girarPieza(nervio, giro.x, giro.y, giro.z, absoluto = true)
+
+        // El vértice del ángulo recto es el punto (0, 0) del contorno, y el contorno se
+        // usa con sus coordenadas **crudas**: el origen de la pieza cae justo ahí. Así
+        // que la pieza va a la esquina y ya.
+        //
+        // Se comprobó midiendo y no leyendo: la primera versión compensaba medio
+        // triángulo suponiendo que el contorno se centraba en su caja —que es lo que
+        // hace `taladro` con su `desplazamiento`, y por eso parecía razonable— y el
+        // nervio salía desplazado 10 mm en dos ejes a la vez, sin tocar ninguna de las
+        // dos piezas. Compilaba, se creaba la pieza y el revisor la veía como un sólido
+        // suelto.
+        mover(nervio, esquina.x, esquina.y, esquina.z, absoluto = true)
+
+        ultimoNervio = nervio
+        seleccionar(nervio)
+        if (!abierta) cerrarTransaccion()
+        ultimoError = null
+        return true
+    }
+
+    /** El nervio del último [ponerNervio], para poder darle un alias. */
+    var ultimoNervio: String? = null
+        private set
+
+    /**
+     * A qué eje del mundo y con qué signo llega cada coordenada del contorno.
+     *
+     * Un `EXTRUSION` nace con el contorno en XZ y se levanta por Y. Al tumbarlo para
+     * que el espesor vaya por otro eje, las dos coordenadas del contorno acaban en
+     * otros ejes del mundo y una de ellas invertida. Escribirlo aquí, una vez, evita
+     * el error de signo que en una pieza simétrica no se nota y en un triángulo pone
+     * el nervio en la esquina de enfrente.
+     */
+    private fun mapaDelPerfil(ejeDelEspesor: Int, ejeDelPlano: Int): Pair<Int, Float> =
+        when (ejeDelEspesor) {
+            // Sin giro: el contorno ya está en XZ.
+            1 -> ejeDelPlano to 1f
+            // Giro de −90° en Z: Y→X, X→−Y, Z→Z.
+            0 -> if (ejeDelPlano == 1) 1 to -1f else 2 to 1f
+            // Giro de +90° en X: Y→Z, Z→−Y, X→X.
+            else -> if (ejeDelPlano == 0) 0 to 1f else 1 to -1f
+        }
+
+    private fun componente(v: Vec3, eje: Int) = when (eje) {
+        0 -> v.x
+        1 -> v.y
+        else -> v.z
+    }
+
+    private fun rechazarNervio(estabaAbierta: Boolean, motivo: String): Boolean {
+        if (!estabaAbierta) revertirTransaccion(documento)
+        return rechazar(motivo)
+    }
+
+    /**
      * Ahueca una pieza dejando una pared imprimible, **sin cambiar sus cotas**.
      *
      * El `VACIADO` del kernel es un cascarón centrado en la superficie: reparte el
@@ -2248,10 +2420,28 @@ class Editor(inicial: Documento = Documento.vacio()) {
         for (candidato in candidatos) {
             val propuesta = plan.copy(operaciones = plan.operaciones + candidato)
             val despues = reparosDe(propuesta, nombrePerfil, perfil) ?: continue
-            val cerroElContacto = despues.none { it.clase == ClaseDeFallo.SOLIDOS_SUELTOS }
-            if (cerroElContacto && despues.size <= antes.size) return propuesta
+            if (mejora(antes, despues)) return propuesta
         }
         return null
+    }
+
+    /**
+     * ¿El plan cosido deja la pieza mejor que el original?
+     *
+     * La versión anterior preguntaba solo si quedaban sólidos sueltos, y con eso un
+     * cosido que no arreglaba nada pasaba por bueno en cuanto el fallo era de otra
+     * clase —una resta que no corta, por ejemplo—: `none { SOLIDOS_SUELTOS }` es
+     * trivialmente cierto cuando nunca hubo sólidos sueltos.
+     *
+     * Ahora se exige que haya **menos fallos en total** y que **ninguna clase empeore**.
+     * Lo segundo importa por sí solo: mover un sustraendo para que corte puede separar
+     * la pieza en dos, y cambiar un fallo por otro no es coser, es barajar.
+     */
+    private fun mejora(antes: List<Reparo>, despues: List<Reparo>): Boolean {
+        if (despues.size >= antes.size) return false
+        return ClaseDeFallo.entries.all { clase ->
+            despues.count { it.clase == clase } <= antes.count { it.clase == clase }
+        }
     }
 
     /** Los fallos de modelado que deja un plan, medidos en un banco. `null` si no aplica. */

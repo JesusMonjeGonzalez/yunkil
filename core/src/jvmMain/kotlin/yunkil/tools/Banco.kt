@@ -125,6 +125,43 @@ private fun casos(): List<Caso> = listOf(
     Caso("un pomo redondeado de 30 mm con un agujero M6 en el centro") { e ->
         if (cuentaDeTipo(e, "DIFERENCIA") == 0) "falta el agujero" else null
     },
+
+    // Los cuatro siguientes suben la escala a doce y meten los modos de fallo que los
+    // ocho primeros no tocaban: una pieza hueca con cota exterior exacta, un encaje
+    // entre dos piezas que tienen que caber una en otra, una pared con nervio, y una
+    // pieza que hay que orientar para que se imprima. Son las que separan «hace algo
+    // parecido» de «sirve».
+    Caso("una caja hueca de 80 x 50 x 30 mm por fuera, con 2 mm de pared y sin tapa") { e ->
+        mide(e, 0, 80f) ?: mide(e, 1, 30f) ?: mide(e, 2, 50f)
+            ?: if (cuentaDeTipo(e, "VACIADO") > 0 || cuentaDeTipo(e, "DIFERENCIA") > 0) null
+            else "salió maciza"
+    },
+
+    Caso("un tapón cilíndrico que entre en un tubo de 20 mm de diámetro interior") { e ->
+        // Un tapón que mide 20 clavados no entra: la impresora deja el agujero pequeño
+        // y la pieza gorda. Tiene que quedarse por debajo, y no demasiado.
+        val ancho = tamano(e).first
+        if (ancho > 20f) "mide $ancho mm y no entra en un agujero de 20"
+        else if (ancho < 18f) "mide $ancho mm y bailaría dentro"
+        else null
+    },
+
+    Caso("una escuadra de 60 x 60 mm con un nervio de refuerzo en la esquina") { e ->
+        // El nervio es una tercera pieza en diagonal o un triángulo extruido; lo que no
+        // vale es una escuadra pelada.
+        val piezas = e.filas().count { it.profundidad > 0 && !it.esOperacion }
+        if (piezas < 2) "solo hay una pieza: no hay nervio"
+        else if (cuentaDeTipo(e, "UNION") == 0) "el nervio no está unido a la escuadra"
+        else null
+    },
+
+    Caso("un gancho para colgar de una puerta de 4 cm de grosor") { e ->
+        // La boca del gancho tiene que dar los 40 mm de la puerta. Es la cota que el
+        // modelo tiene que sacar de la petición y llevar a la geometría.
+        val alto = tamano(e).second
+        if (alto < 45f) "mide $alto mm de alto y no abraza una puerta de 40"
+        else null
+    },
 )
 
 fun main(args: Array<String>) {

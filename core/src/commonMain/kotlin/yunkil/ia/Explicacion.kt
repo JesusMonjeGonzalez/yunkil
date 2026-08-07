@@ -146,6 +146,7 @@ object Explicacion {
         is Patron -> listOf(op.objetivo)
         is Pared -> listOf(op.objetivo)
         is Filete -> listOfNotNull(op.objetivo, op.contra)
+        is Nervio -> listOf(op.objetivo, op.contra)
         is Apoyar -> listOf(op.objetivo)
         is Seleccionar -> listOf(op.objetivo)
         is Asentar -> emptyList()
@@ -280,6 +281,14 @@ object Explicacion {
                     "el canto entre ${r.visible(op.objetivo)} y ${r.visible(op.contra)}"
                 else "todos los cantos de ${r.visible(op.objetivo)}"
                 "Redondea $canto con radio ${medida(op.radio)} mm"
+            }
+
+            is Nervio -> {
+                val cuanto = if (op.tamano > 0f) " de ${medida(op.tamano)} mm" else ""
+                val grueso = if (op.grosor > 0f) ", ${medida(op.grosor)} mm de espesor" else ""
+                r.registrar(op.alias, "Nervio")
+                "Refuerza con un nervio$cuanto$grueso la esquina entre " +
+                    "${r.visible(op.objetivo)} y ${r.visible(op.contra)}"
             }
 
             is Apoyar ->

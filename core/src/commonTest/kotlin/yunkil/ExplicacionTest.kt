@@ -150,6 +150,7 @@ class ExplicacionTest {
             Pared(objetivo = "a", grosor = 2f),
             Asentar(),
             Filete(objetivo = "a", radio = 1f),
+            Nervio(objetivo = "a", contra = "a"),
             Apoyar(objetivo = "a"),
             Seleccionar(objetivo = "a"),
             Eliminar(objetivo = "a"),

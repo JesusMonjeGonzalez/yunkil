@@ -84,7 +84,7 @@ object RevisorDeGeometria {
         nodo: SdfNode,
         perfil: PerfilFabricacion = PerfilFabricacion.PREDETERMINADO,
     ): List<Reparo> =
-        motivosDeRestasInutiles(documento).map { Reparo(ClaseDeFallo.RESTA_SIN_EFECTO, it) } +
+        reparosDeRestasInutiles(documento) +
             listOfNotNull(reparoDePiezasSueltas(documento, nodo, perfil))
 
     /**
@@ -101,8 +101,8 @@ object RevisorDeGeometria {
      * alimenta un reintento automático, y un falso positivo mandaría al modelo a
      * arreglar algo que ya estaba bien.
      */
-    private fun motivosDeRestasInutiles(documento: Documento): List<String> {
-        val salida = ArrayList<String>()
+    private fun reparosDeRestasInutiles(documento: Documento): List<Reparo> {
+        val salida = ArrayList<Reparo>()
 
         fun visitar(pieza: Pieza) {
             if (!pieza.visible) return
@@ -113,11 +113,19 @@ object RevisorDeGeometria {
                         if (!sustraendo.visible) continue
                         val cotas = documento.nodoEnMundoDe(sustraendo.id)?.cotas() ?: continue
                         val hueco = separacionEntre(minuendo, cotas) ?: continue
+                        val arreglo = arregloDeRestaInutil(sustraendo, minuendo, cotas)
+                        val receta = arreglo?.let {
+                            " Escribe exactamente esta operación: ${it.comoJson()}."
+                        }.orEmpty()
                         salida.add(
-                            "«${sustraendo.nombre}» está dentro de una DIFERENCIA pero no toca a " +
-                                "«${pieza.hijos[0].nombre}»: se queda a $hueco mm, así que no quita " +
-                                "nada de material y el agujero no existe. Colócalo atravesando la " +
-                                "pieza que tiene que perforar.",
+                            Reparo(
+                                ClaseDeFallo.RESTA_SIN_EFECTO,
+                                "«${sustraendo.nombre}» está dentro de una DIFERENCIA pero no toca a " +
+                                    "«${pieza.hijos[0].nombre}»: se queda a $hueco mm, así que no quita " +
+                                    "nada de material y el agujero no existe. Colócalo atravesando la " +
+                                    "pieza que tiene que perforar.$receta",
+                                listOfNotNull(arreglo),
+                            ),
                         )
                     }
                 }
@@ -127,6 +135,58 @@ object RevisorDeGeometria {
 
         visitar(documento.raiz)
         return salida
+    }
+
+    /**
+     * El `mover` que devuelve un sustraendo al interior de lo que tenía que perforar.
+     *
+     * Existe porque esta clase de fallo salía **sin arreglo**: el aviso decía «colócalo
+     * atravesando la pieza» y dependía de que el modelo escribiera la operación bien y
+     * de gastar una ronda entera. Es la misma lección que ya subió la geometría limpia
+     * de 6/8 a 7/8 con los sólidos sueltos —una operación descrita no se usa, una
+     * operación vista escrita sí— aplicada al modo de fallo que quedaba suelto.
+     *
+     * La regla: se corrige **solo en los ejes donde las cajas están separadas**, y en
+     * esos se lleva el sustraendo al centro del minuendo. En los demás no se toca nada,
+     * porque ahí la posición que puso el modelo sí funcionaba y recentrarla convertiría
+     * cuatro agujeros repartidos en cuatro agujeros apilados en el centro.
+     */
+    private fun arregloDeRestaInutil(sustraendo: Pieza, minuendo: Aabb, cotas: Aabb): Operacion? {
+        val centroDelHueco = cotas.center
+        val centroDelCuerpo = minuendo.center
+
+        fun corregido(
+            separados: Boolean,
+            actual: Float,
+            destino: Float,
+        ): Float = if (separados) destino else actual
+
+        val separadoEnX = minuendo.min.x > cotas.max.x || cotas.min.x > minuendo.max.x
+        val separadoEnY = minuendo.min.y > cotas.max.y || cotas.min.y > minuendo.max.y
+        val separadoEnZ = minuendo.min.z > cotas.max.z || cotas.min.z > minuendo.max.z
+        if (!separadoEnX && !separadoEnY && !separadoEnZ) return null
+
+        // La posición de la pieza no es el centro de su caja: la caja incluye la
+        // transformación. Se mueve por **diferencia**, que es lo único que no exige
+        // saber de dónde partía.
+        val delta = Vec3(
+            corregido(separadoEnX, 0f, centroDelCuerpo.x - centroDelHueco.x),
+            corregido(separadoEnY, 0f, centroDelCuerpo.y - centroDelHueco.y),
+            corregido(separadoEnZ, 0f, centroDelCuerpo.z - centroDelHueco.z),
+        )
+        // Por **nombre** y no por id, igual que el arreglo de los sólidos sueltos: el
+        // arreglo se calcula en un banco y se vuelve a aplicar en otro, y los
+        // identificadores los renumera el aplicador en cada pasada. Un id de aquí no
+        // significa nada allí, y la operación se omitiría en silencio.
+        if (sustraendo.nombre.isBlank()) return null
+        return Mover(
+            objetivo = sustraendo.nombre,
+            x = delta.x,
+            y = delta.y,
+            z = delta.z,
+            absoluto = false,
+            nota = "para que el corte alcance la pieza",
+        )
     }
 
     /** Separación entre dos cajas, o `null` si se tocan o se solapan. */
@@ -254,11 +314,32 @@ object RevisorDeGeometria {
         )
     }
 
-    /** La operación tal y como se le enseña al modelo para que la copie. */
-    private fun Colocar.comoJson(): String {
-        val h = ((holgura * 100f).roundToInt() / 100f)
-        return """{"op":"colocar","objetivo":"$objetivo","referencia":"$referencia",""" +
-            """"cara":"${cara.etiqueta}","holgura":$h,"centrar":$centrar}"""
+    /**
+     * La operación tal y como se le enseña al modelo para que la copie.
+     *
+     * Se escribe a mano y no con el serializador porque lo que se le enseña al modelo
+     * tiene que ser exactamente lo que él escribiría: el serializador emite todos los
+     * campos por omisión, y un ejemplo con quince claves enseña a rellenar quince
+     * claves.
+     */
+    private fun Operacion.comoJson(): String = when (this) {
+        is Colocar -> {
+            val h = ((holgura * 100f).roundToInt() / 100f)
+            """{"op":"colocar","objetivo":"$objetivo","referencia":"$referencia",""" +
+                """"cara":"${cara.etiqueta}","holgura":$h,"centrar":$centrar}"""
+        }
+        is Mover ->
+            """{"op":"mover","objetivo":"$objetivo","x":${redondo(x)},""" +
+                """"y":${redondo(y)},"z":${redondo(z)},"absoluto":$absoluto}"""
+        // Ninguna otra operación se emite hoy como arreglo. Si algún día se emite,
+        // esto tiene que fallar en compilación y no colar un texto vacío que el modelo
+        // leería como una instrucción sin contenido.
+        else -> error("no hay forma canónica de escribir ${this::class.simpleName} para el modelo")
+    }
+
+    private fun redondo(v: Float): String {
+        val r = (v * 100f).roundToInt() / 100f
+        return if (r == r.toInt().toFloat()) r.toInt().toString() else r.toString()
     }
 
     /**

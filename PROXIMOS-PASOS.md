@@ -6,29 +6,55 @@ hace aquí, [docs/TOP10-COMPETIDORES.md](docs/TOP10-COMPETIDORES.md). El diseño
 tanda del 7 de agosto está en
 [docs/superpowers/specs/2026-08-07-conversacion-de-verdad-design.md](docs/superpowers/specs/2026-08-07-conversacion-de-verdad-design.md).
 
-## Prioridades, reordenadas el 7 de agosto de 2026
+## Prioridades, al 7 de agosto de 2026
 
-Criterio: **qué frena a alguien que abre Yunkil hoy**. Con el banco marcando 7/8, la
-IA ya no es lo más urgente; la aplicación sí.
+Criterio fijado por el usuario: **primero que la IA genere piezas correctas y que el
+canal modelo ↔ motor sea excelente; la interfaz bonita, después**. El listón es
+**8/10 como mínimo** en el banco, y por eso el banco pasó de 8 casos a 12: para poder
+hablar de una proporción hace falta una escala.
 
-1. ~~**La malla importada no se dibuja.**~~ — hecho el 7 de agosto (abajo).
-2. **La carcasa.** `App.swift` son 2.163 líneas y la interfaz es SwiftUI de serie.
-   Partirlo no es lujo: el panel de propuesta ya vive dentro de ese archivo.
-3. **Gizmo de mover y girar.** Empujar caras existe y `MOVER_PIEZA` existe, y aun así
-   colocar una pieza sigue siendo teclear números.
-4. **El defecto abierto de exportación** — agujeros a 0,5 mm y no a 0,4 ni a 0,6. El
+### A. Que la IA acierte (todo lo demás espera)
+
+1. **Cada modo de fallo con su arreglo ejecutable.** La lección ya medida —una
+   operación descrita no se usa, una operación vista escrita sí— aplicada a todo el
+   catálogo. `SOLIDOS_SUELTOS` ya lo tenía; `RESTA_SIN_EFECTO` se le añadió el 7 de
+   agosto. Cualquier clase nueva nace con su operación.
+2. **Subir el nivel de abstracción del DSL**, que es la palanca que confirma la
+   evidencia externa (ver abajo). Hechas: `taladro`, `patron`, `pared`, `acotar`,
+   `filete`, `apoyar`, `nervio`. Pendientes de la lista original: `holgura` y
+   `chaflan`.
+3. **Biblioteca de ejemplares ampliada** (paso 1d de la hoja de ruta de IA): de los 21
+   actuales a 30, cubriendo cada operación de dominio aplicada al menos una vez. Un
+   modelo pequeño usa lo que ha visto aplicado.
+4. **Modelo con visión nuevo + bucle visual.** `Qwen3-VL-8B-Instruct` Q4_K_M: ~6 GB y
+   **256K de contexto nativo** frente a los 12 GB y 16K de `bonsai-ternary-27b`. Los
+   256K quitan además el techo de 14.000 caracteres del prompt, que lleva semanas
+   condicionando cada decisión —y que esta misma tanda volvió a topar—. La elección se
+   cierra midiendo con el banco, no antes.
+5. **Repetir cada caso N veces** en la medida oficial. Un modelo es estocástico y una
+   tirada de doce números sirve para diagnosticar, no para decidir.
+
+### B. La aplicación
+
+6. **La carcasa.** `App.swift` son 2.163 líneas y la interfaz es SwiftUI de serie.
+7. **Gizmo de mover y girar.**
+8. **El defecto abierto de exportación** — agujeros a 0,5 mm y no a 0,4 ni a 0,6. El
    exportador lo detecta y se niega a entregar, así que no hay STL roto en manos de
    nadie, pero es una prueba con `@Ignore` esperando.
-5. **Modelo con visión nuevo + bucle visual.** Juntos: el bucle sin un VLM que aguante
-   el contexto es el paso que ya se dijo que podía decepcionar. El candidato es
-   `Qwen3-VL-8B-Instruct` Q4_K_M —~6 GB y 256K de contexto nativo, frente a los 12 GB
-   y 16K de `bonsai-ternary-27b`—, y la elección se cierra midiendo con el banco, no
-   antes.
-6. **Bocetos 2D interactivos.** La brecha real contra Shapr3D, y la más cara.
+9. **Bocetos 2D interactivos.** La brecha real contra Shapr3D, y la más cara.
 
-Bajan de puesto la previsualización fantasma y el rediseño estético: la primera toca
-la paridad para algo que no arregla ningún hueco, y la segunda no arregla que la
-función bandera se viera mal.
+Hecho y fuera de la lista: la malla importada ya se dibuja en el viewport.
+
+**Sobre modelos 3D especializados, con evidencia.** [Text2CAD-Bench](https://arxiv.org/html/2605.18430v1)
+(mayo 2026) mide Text2CAD, Text2CADQuery y CADFusion contra los LLM generales: los
+especializados sacan invalidez bajísima (2-6 %) y **geometría mucho peor** —Chamfer
+Distance ~220 frente a 44-70—, o sea código que ejecuta y está mal. Confirma la
+decisión del 4 de agosto. El mismo trabajo añade un aviso que sí toca a Yunkil: **la
+representación pesa más que el modelo**, y las representaciones de tipo *secuencia de
+comandos* miden peor que las de tipo *código* en todos los modelos probados. El DSL de
+Yunkil es una secuencia de operaciones; el contrapeso es que el banco mide 8/8 de JSON
+válido —el cuello de botella no está ahí— y que «el modelo nunca ejecuta código» es
+una decisión de producto. Queda escrito para no olvidarlo.
 
 **Sobre modelos 3D especializados, con evidencia.** [Text2CAD-Bench](https://arxiv.org/html/2605.18430v1)
 (mayo 2026) mide Text2CAD, Text2CADQuery y CADFusion contra los LLM generales: los
