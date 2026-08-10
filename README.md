@@ -83,8 +83,27 @@ medido, y **falla cerrado**: si no se puede medir, se dice y no se aprueba.
 
 Lo que esto promete se puede demostrar sin tener la impresora delante: no que la pieza
 entre —eso depende además de la máquina—, sino que **la geometría exportada tiene la
-holgura declarada contra la medida dada**. Los perfiles siguen siendo `de fábrica`: no hay
-cupón de calibración, así que `OrigenDelPerfil.CALIBRADO` es hoy un estado inalcanzable.
+holgura declarada contra la medida dada**.
+
+### Cupón de calibración
+
+Para pasar de ahí a «entra en tu máquina» hace falta medir la máquina, y para eso está el
+cupón: una placa con ocho agujeros pasantes a holguras escalonadas alrededor de la que
+tabula el perfil, más **un solo pasador** de 8 mm. Se imprime, se prueba el pasador agujero
+por agujero, y el primero en el que entra da la holgura real. Con un pasador único todo lo
+que varía está en la placa; una fila de pasadores distintos mediría a la vez cuánto engorda
+el agujero y cuánto engorda el pasador, y no habría forma de despejar ninguna de las dos.
+Las estaciones se cuentan desde una ranura en el extremo apretado, porque el texto
+paramétrico no existe todavía y un número de 3 mm impreso en FDM se lee peor que una marca.
+
+`PerfilFabricacion.calibradoCon` toca **una sola cosa**, la holgura, porque el cupón mide
+una sola cosa; y marca el perfil como `CALIBRADO`, que hasta ahora era un estado que nada
+podía producir.
+
+**El cupón no se puede entregar todavía**, y no por el cupón: lleva un escalón cóncavo
+—el vástago sobre su pie— y ahí el contorneado se cruza consigo mismo a unas resoluciones
+sí y a otras no, de modo que el certificado se niega a escribir el archivo. Ver el límite
+del contorneado más abajo. Mientras siga, los perfiles siguen siendo `de fábrica`.
 
 ### Motor orgánico nativo
 
@@ -387,16 +406,24 @@ ni documentos.
 - Las medidas del mundo se dan de alta con procedencia `a ojo` cuando las escribe la IA:
   al modelo se lo han dicho, no lo ha medido. Subirlas a `con calibre` es cosa de quien
   midió, y hoy solo se puede hacer desde el núcleo, no desde la interfaz.
-- El contorneado deja agujeros en codos cerrados a ciertas resoluciones. Una cola de 4 mm
-  de radio con un giro cerrado falla el certificado a 0,8 y a 0,4 mm y lo pasa a 0,5 y a
-  0,3 mm. No depende de la primitiva: la misma cola como cordón y como cadena de cápsulas
-  falla igual, con el mismo número de triángulos. No es el salto de celdas del muestreo
-  —desactivarlo no cambia nada—, así que queda por diagnosticar. El certificado hace lo
-  que debe y se niega a escribir, de modo que el síntoma es un export que no sale, no una
-  pieza rota; el reintento automático al doble de detalle tampoco lo salva porque la
-  mitad de una resolución que falla también falla. La resolución que sugiere la
-  aplicación para una figura de ese tamaño —0,3 mm— sí exporta, así que esto se ve
-  pidiendo un mallado grueso a mano, no en el camino normal.
+- **El contorneado se cruza consigo mismo en aristas vivas cóncavas**, a unas resoluciones
+  sí y a otras no. Está acotado y medido en `ContorneadoEnAristasVivasTest`:
+  - Un primitivo suelto —esfera, caja, caja redondeada, cilindro— **nunca** se cruza, a
+    ninguna resolución entre 0,25 y 0,6 mm.
+  - Un escalón cóncavo sí. El caso mínimo es un pasador de 8 mm sobre un pie de 16: se
+    cruza a 0,45, 0,50 y 0,55 mm y está limpio a 0,25, 0,30, 0,35, 0,40 y 0,60.
+  - **No es la costura de una booleana.** El mismo escalón construido como revolución de
+    un contorno de una pieza falla igual, en resoluciones parecidas. Lo que lo dispara es
+    la arista entrante, que es el caso clásicamente malo del dual contouring: el vértice
+    de la celda quiere colocarse fuera de ella, se le recorta a su celda —cosa que ya se
+    hace— y los cuadriláteros que salen pueden cruzarse igualmente.
+  - Una placa lisa con un solo taladro se cruza a 0,35 mm y está limpia a las demás.
+
+  El certificado hace lo que debe y se niega a escribir, así que el síntoma es un export
+  que no sale, no una pieza rota. El reintento al doble de detalle salva unos casos y no
+  otros: el cupón de calibración pedido a 0,50 se entrega a 0,25 y pasa, y pedido a la
+  resolución que la propia aplicación sugiere —0,543— se reintenta a 0,271 y sigue
+  cruzándose. Es el fallo que hoy más valor tiene arreglar, porque bloquea la calibración.
 - El 3MF se escribe sin compresión.
 - No existe aplicación iPad ni render por tiles.
 - Las curvas se escriben en el contrato y se reeditan reescribiéndolo o pidiéndoselo otra
@@ -426,7 +453,13 @@ ni documentos.
 
 ## Prioridades vigentes
 
-Orden obligatorio hasta que este README cambie. El orden viene de una auditoría externa
+Orden obligatorio hasta que este README cambie.
+
+0. **Que el contorneado no se cruce en aristas vivas cóncavas.** Sube al primer puesto
+   porque ya no es un límite teórico: bloquea la exportación del cupón de calibración, y
+   sin cupón la promesa de encaje se queda en «tiene la holgura que declaraste» sin poder
+   llegar nunca a «entra en tu máquina». Está acotado con un caso mínimo, que es lo que
+   antes faltaba para poder atacarlo. El orden viene de una auditoría externa
 cuya tesis se acepta: el salto siguiente no es añadir primitivas, sino cerrar confianza,
 reproducibilidad e interacción. Añadir formas nuevas queda por detrás de eso.
 
@@ -444,11 +477,10 @@ reproducibilidad e interacción. Añadir formas nuevas queda por detrás de eso.
 5. Selección y modificación directa de partes orgánicas, incluidos los puntos de control
    de una curva agarrados en el viewport.
 6. Gizmo de mover/girar, ensamblajes ligeros e interferencias.
-7. Perfiles de fabricación persistentes, editables, calibrables y versionados, con **cupón
-   de calibración**: una probeta de pasadores y agujeros a holguras escalonadas que se
-   imprime, se mide y fija la holgura del perfil marcándolo como `CALIBRADO`. Es lo que
-   convierte «la geometría tiene la holgura que declaraste» en «la pieza entra en tu
-   máquina», y lo único que hoy separa una cosa de la otra.
+7. Perfiles de fabricación persistentes, editables y versionados. El cupón de calibración
+   y `calibradoCon` ya están hechos y probados; lo que falta para poder usarlos es que un
+   perfil calibrado se guarde en disco, y que el contorneado deje de cruzarse para que el
+   cupón se pueda exportar.
 8. Validación con impresiones reales y perfiles calibrados por máquina.
 9. Editor visual de perfiles con líneas, arcos, Bézier, cotas y restricciones.
 10. Curvas en el DSL paramétrico, para cables, latiguillos y guías técnicas.
