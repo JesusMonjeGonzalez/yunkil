@@ -2,6 +2,8 @@ package yunkil.ia
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import yunkil.doc.ClaseDeAjuste
+import yunkil.doc.SentidoDeEncaje
 import yunkil.fabricacion.AjusteDeTaladro
 
 /**
@@ -65,6 +67,8 @@ data class Envolver(
     val alias: String? = null,
     val nombre: String? = null,
     val parametros: Map<String, Float> = emptyMap(),
+    val eje: EjeNombrado? = null,
+    val cuenta: Int? = null,
     override val nota: String? = null,
 ) : Operacion
 
@@ -123,6 +127,35 @@ data class Acotar(
     val objetivo: String = "modelo",
     val eje: EjeNombrado = EjeNombrado.X,
     val medida: Float,
+    override val nota: String? = null,
+) : Operacion
+
+/**
+ * Declara que una pieza tiene que encajar con algo que mide lo que se dice.
+ *
+ * Un modelo de lenguaje sabe perfectamente que un tapón para un tubo de 20 mm no puede
+ * medir 20; lo que no sabe es **cuánto menos**, porque eso depende de la boquilla, del
+ * material y de cuánto engorda la impresora. Ese número está tabulado en el perfil de
+ * fabricación (`holguraEncaje`) y no en la cabeza de nadie: pedírselo al modelo es
+ * garantizar que se lo invente.
+ *
+ * La operación no redimensiona y se olvida: dejó de ser un evento para ser una
+ * **relación**. Da de alta la medida en el documento y ata la pieza a ella, así que
+ * corregir el número más tarde —o cambiar de perfil— mueve la pieza sola. Ver
+ * [yunkil.doc.Encaje].
+ */
+@Serializable
+@SerialName("holgura")
+data class Holgura(
+    val objetivo: String = "seleccion",
+    val eje: EjeNombrado = EjeNombrado.X,
+    /** Lo que mide el sitio donde entra, o lo que mide la pieza que hay que recibir. */
+    val medida: Float,
+    val encaje: SentidoDeEncaje = SentidoDeEncaje.ENTRA,
+    /** Cómo de apretado. Un pasador a martillo y un paso de cable no llevan lo mismo. */
+    val ajuste: ClaseDeAjuste = ClaseDeAjuste.DESLIZANTE,
+    /** Cómo se llama en el proyecto lo que se ha medido: «diámetro interior del tubo». */
+    val nombreDeLaMedida: String? = null,
     override val nota: String? = null,
 ) : Operacion
 
@@ -311,6 +344,8 @@ data class Filete(
     val contra: String? = null,
     /** Radio del redondeo, en milímetros. */
     val radio: Float = 2f,
+    /** `true` corta plano; por defecto redondea, que es lo que había antes. */
+    val chaflan: Boolean = false,
     override val nota: String? = null,
 ) : Operacion
 
@@ -371,8 +406,13 @@ data class Seleccionar(
  * plan en vez de deducirse de la redacción en el momento de aplicar.
  */
 @Serializable
+enum class EstadoDelPlan { PLAN, NECESITA_DATOS }
+
+@Serializable
 data class PlanDeModelado(
+    val estado: EstadoDelPlan = EstadoDelPlan.PLAN,
     val resumen: String = "",
+    val preguntas: List<String> = emptyList(),
     val reemplazar: Boolean = false,
     val operaciones: List<Operacion> = emptyList(),
 )

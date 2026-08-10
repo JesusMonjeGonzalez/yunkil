@@ -121,22 +121,72 @@ class TaladroEnPerfilTest {
         }
     }
 
-    @Test
-    fun `pedir un punto de contorno donde no hay contorno se explica`() {
+    // ------------------------------------------------------------ sin contorno
+
+    /**
+     * Un punto sobre una pieza que no tiene contorno **no tira el plan**: es el arnés
+     * del caso 3 del banco, donde el 9B escribía «oreja» y perdía las nueve
+     * operaciones buenas que venían detrás por una coordenada mal encuadrada.
+     *
+     * Se cae a desplazamiento midiendo, no suponiendo: primero se lee el punto desde
+     * la esquina de la pieza —que es como se escriben las coordenadas de un contorno—
+     * y solo si eso cae fuera se prueba desde el centro.
+     */
+    private fun caja(taladro: String): Pair<Editor, yunkil.ia.ResultadoDeAplicacion> {
         val editor = Editor(Documento.vacio())
         val leido = editor.interpretarPlan(
             """
             {"resumen":"Caja","reemplazar":true,"operaciones":[
               {"op":"crear","tipo":"CAJA","alias":"c","nombre":"Caja",
                "parametros":{"anchura":40,"altura":10,"profundidad":40}},
-              {"op":"taladro","objetivo":"c","diametro":5,"punto":[10,10]}
+              $taladro
             ]}
             """.trimIndent()
         )
         val plan = assertNotNull(leido.plan, "no se interpretó: ${leido.motivoDelRechazo}")
-        val resultado = editor.aplicarPlan(plan, null)
+        return editor to editor.aplicarPlan(plan, null)
+    }
 
-        assertTrue(resultado.omitidas.isNotEmpty(), "una caja no tiene contorno; debería quejarse")
+    private fun brocaDe(editor: Editor): List<Float> {
+        val broca = assertNotNull(
+            editor.filas().firstOrNull { it.nombre.startsWith("Taladro") },
+            "no se creó ninguna broca",
+        )
+        return editor.transformDe(broca.id)
+    }
+
+    @Test
+    fun `un punto sin contorno se lee desde la esquina de la pieza`() {
+        // Caja de 40 × 40 en planta centrada en el origen: 10 mm desde su esquina son
+        // −10 mm desde su centro.
+        val (editor, resultado) = caja("""{"op":"taladro","objetivo":"c","diametro":5,"punto":[10,10]}""")
+
+        assertTrue(resultado.exito, "el taladro debería aplicarse: ${resultado.resumen}")
+        val t = brocaDe(editor)
+        assertTrue(abs(t[0] + 10f) < 0.05f, "X del taladro ${t[0]}, debería ser −10")
+        assertTrue(abs(t[2] + 10f) < 0.05f, "Z del taladro ${t[2]}, debería ser −10")
+        assertTrue(
+            resultado.omitidas.any { "contorno" in it },
+            "el apaño tiene que quedar dicho: ${resultado.omitidas}",
+        )
+    }
+
+    @Test
+    fun `un punto sin contorno que solo cabe desde el centro se lee desde el centro`() {
+        // Desde la esquina, −15 caería en −35 y la caja acaba en −20: fuera de la
+        // pieza. Desde el centro cae dentro, así que esa es la lectura buena.
+        val (editor, resultado) = caja("""{"op":"taladro","objetivo":"c","diametro":5,"punto":[-15,0]}""")
+
+        assertTrue(resultado.exito, "el taladro debería aplicarse: ${resultado.resumen}")
+        val t = brocaDe(editor)
+        assertTrue(abs(t[0] + 15f) < 0.05f, "X del taladro ${t[0]}, debería ser −15")
+        assertTrue(abs(t[2]) < 0.05f, "Z del taladro ${t[2]}, debería ser 0")
+    }
+
+    @Test
+    fun `un punto sin contorno que no cae en la pieza de ninguna forma se explica`() {
+        val (_, resultado) = caja("""{"op":"taladro","objetivo":"c","diametro":5,"punto":[200,0]}""")
+
         assertTrue(
             resultado.omitidas.any { "contorno" in it },
             "el motivo debería nombrar el contorno: ${resultado.omitidas}",

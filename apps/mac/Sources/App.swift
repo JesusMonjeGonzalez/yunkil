@@ -4,6 +4,18 @@ import SwiftUI
 import UniformTypeIdentifiers
 @preconcurrency import YunkilCore
 
+enum MotorDeIA: String, CaseIterable, Identifiable {
+    case parametrico = "Pieza técnica"
+    case organico = "Figura orgánica"
+    var id: String { rawValue }
+}
+
+struct PropuestaOrganica {
+    let nombre: String
+    let contrato: String
+    let objetivoId: String?
+}
+
 // MARK: - Vista Metal con gestos
 
 /// `MTKView` que además atiende ratón y trackpad.
@@ -30,6 +42,9 @@ final class VistaMetalInteractiva: MTKView {
     var alEmpezarAMoverPlano: ((SIMD3<Float>, SIMD3<Float>) -> (normal: SIMD3<Float>, distancia: Float)?)?
     /// Cada fotograma del arrastre del plano, en milímetros a lo largo de su normal.
     var alMoverPlano: ((Float) -> Void)?
+    var alEmpezarAEsculpir: ((SIMD3<Float>, SIMD3<Float>) -> Bool)?
+    var alContinuarEsculpiendo: ((SIMD3<Float>, SIMD3<Float>) -> Void)?
+    var alTerminarDeEsculpir: (() -> Void)?
 
     /// Un arrastre orbita, un clic señala. Se distinguen por recorrido y no por
     /// tiempo: soltar el ratón un poco más tarde no debe cambiar lo que hace.
@@ -40,6 +55,8 @@ final class VistaMetalInteractiva: MTKView {
 
     /// Plano de sección que se está arrastrando, mientras dure el gesto.
     private var planoEnArrastre: (normal: SIMD3<Float>, distancia: Float)?
+    private var esculpiendo = false
+    private var recorridoDesdeSello: CGFloat = 0
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -77,6 +94,14 @@ final class VistaMetalInteractiva: MTKView {
         recorridoDelArrastre = 0
         caraEnArrastre = nil
         planoEnArrastre = nil
+        esculpiendo = false
+        recorridoDesdeSello = 0
+
+        if let alEmpezarAEsculpir, let rayo = rayoDelCursor(evento),
+           alEmpezarAEsculpir(rayo.origen, rayo.direccion) {
+            esculpiendo = true
+            return
+        }
 
         // El plano de sección se agarra sin modificador: es el gizmo del punto 1,
         // el mismo patrón de «grab the surface» con el que se empujan las caras.
@@ -100,6 +125,11 @@ final class VistaMetalInteractiva: MTKView {
     override func mouseUp(with evento: NSEvent) {
         caraEnArrastre = nil
         planoEnArrastre = nil
+        if esculpiendo {
+            esculpiendo = false
+            alTerminarDeEsculpir?()
+            return
+        }
         guard recorridoDelArrastre < 3 else { return }
         guard let alPinchar, let rayo = rayoDelCursor(evento) else { return }
         alPinchar(rayo.origen, rayo.direccion)
@@ -124,6 +154,15 @@ final class VistaMetalInteractiva: MTKView {
     override func mouseDragged(with evento: NSEvent) {
         recorridoDelArrastre += abs(evento.deltaX) + abs(evento.deltaY)
         guard let renderizador else { return }
+
+        if esculpiendo {
+            recorridoDesdeSello += abs(evento.deltaX) + abs(evento.deltaY)
+            if recorridoDesdeSello >= 7, let rayo = rayoDelCursor(evento) {
+                recorridoDesdeSello = 0
+                alContinuarEsculpiendo?(rayo.origen, rayo.direccion)
+            }
+            return
+        }
 
         // Arrastrando el plano de sección no se orbita: el plano avanza a lo largo
         // de su normal, igual que una cara se empuja a lo largo de la suya.
@@ -188,6 +227,9 @@ struct VisorMetal: NSViewRepresentable {
     let alEmpujar: (Float) -> Void
     let alEmpezarAMoverPlano: (SIMD3<Float>, SIMD3<Float>) -> (normal: SIMD3<Float>, distancia: Float)?
     let alMoverPlano: (Float) -> Void
+    let alEmpezarAEsculpir: (SIMD3<Float>, SIMD3<Float>) -> Bool
+    let alContinuarEsculpiendo: (SIMD3<Float>, SIMD3<Float>) -> Void
+    let alTerminarDeEsculpir: () -> Void
     let alSoltarStl: (String) -> Void
 
     func makeNSView(context: Context) -> VistaMetalInteractiva {
@@ -197,6 +239,9 @@ struct VisorMetal: NSViewRepresentable {
         vista.alEmpujar = alEmpujar
         vista.alEmpezarAMoverPlano = alEmpezarAMoverPlano
         vista.alMoverPlano = alMoverPlano
+        vista.alEmpezarAEsculpir = alEmpezarAEsculpir
+        vista.alContinuarEsculpiendo = alContinuarEsculpiendo
+        vista.alTerminarDeEsculpir = alTerminarDeEsculpir
         vista.alSoltarStl = alSoltarStl
         // Sin esto la vista no recibe ni un solo mensaje de arrastre, y las tres
         // funciones de arriba no llegan a ejecutarse nunca: registrarse por el tipo
@@ -276,6 +321,13 @@ final class EstadoDeLaApp: ObservableObject {
 
     @Published private(set) var filas: [Fila] = []
     @Published private(set) var parametros: [Parametro] = []
+
+    /// Cómo se lee el encaje de la pieza seleccionada, o `nil` si su cota es libre.
+    @Published private(set) var encajeDescrito: String? = nil
+
+    /// Cotas que manda un encaje. El inspector las enseña, pero no las deja arrastrar:
+    /// un deslizador que se rechaza al soltarlo es peor que un deslizador que no está.
+    @Published private(set) var clavesGobernadas: Set<String> = []
     @Published var seleccion: String = ""
     @Published var estadoDelRender = "iniciando…"
     @Published var aviso: String?
@@ -287,6 +339,17 @@ final class EstadoDeLaApp: ObservableObject {
     @Published var peticionIA = ""
     @Published private(set) var iaTrabajando = false
     @Published var resultadoIA: String?
+    @Published var motorDeIA: MotorDeIA = .parametrico
+    @Published var propuestaOrganica: PropuestaOrganica?
+    @Published var modoBrochaOrganica = "NINGUNA"
+    @Published var radioBrochaOrganica: Float = 4
+    @Published var simetriaBrochaOrganica = true
+    @Published var fuerzaBrochaOrganica: Float = 0.5
+    @Published var ejeDeSimetriaOrganica = "X"
+    @Published var fusionOrganica: Float = 2
+
+    /// Las brochas que deforman el campo en vez de sumar o restar bolas.
+    static let brochasDeCampo: Set<String> = ["ALISAR", "PELLIZCAR", "MOVER", "PROTEGER"]
 
     /// La propuesta que está en pantalla esperando decisión. Nada se aplica sin esto.
     @Published var propuestaPendiente: PropuestaPendiente?
@@ -356,18 +419,34 @@ final class EstadoDeLaApp: ObservableObject {
     }
 
     private func refrescarInspector() {
-        guard !seleccion.isEmpty else { parametros = []; return }
+        guard !seleccion.isEmpty else {
+            parametros = []
+            encajeDescrito = nil
+            clavesGobernadas = []
+            return
+        }
         parametros = editor.parametrosDe(id: seleccion).map(Parametro.init)
+        encajeDescrito = editor.descripcionDeEncaje(piezaId: seleccion)
+        clavesGobernadas = encajeDescrito == nil ? [] : Set(
+            parametros.map(\.clave).filter { editor.gobernadaPorEncaje(id: seleccion, clave: $0) }
+        )
 
         let t = editor.transformDe(id: seleccion).map { $0.floatValue }
         if t.count == 7 {
-            posX = t[0]; posY = t[1]; posZ = t[2]
-            giroX = t[3]; giroY = t[4]; giroZ = t[5]
+            // Un giro que vale −0,0000001 se enseña como «−0», que no significa nada y
+            // desconcierta en una casilla que además se puede editar. Se limpia al leer,
+            // no al escribir: el número que se enseña y el que se edita son el mismo.
+            func casiCero(_ v: Float) -> Float { abs(v) < 5e-4 ? 0 : v }
+            posX = casiCero(t[0]); posY = casiCero(t[1]); posZ = casiCero(t[2])
+            giroX = casiCero(t[3]); giroY = casiCero(t[4]); giroZ = casiCero(t[5])
             escala = t[6]
         }
         eje = editor.ejeDe(id: seleccion)
         cuenta = Int(editor.cuentaDe(id: seleccion))
         nombre = editor.nombreDe(id: seleccion)
+        if editor.esEscultura(id: seleccion) {
+            fusionOrganica = editor.fusionDeEscultura(id: seleccion)
+        }
     }
 
     // MARK: Acciones
@@ -394,11 +473,204 @@ final class EstadoDeLaApp: ObservableObject {
         seleccionar(impacto.piezaId)
     }
 
+    private func selloOrganico(origen: SIMD3<Float>, direccion: SIMD3<Float>) -> Bool {
+        guard modoBrochaOrganica != "NINGUNA",
+              let impacto = editor.senalar(
+                ox: origen.x, oy: origen.y, oz: origen.z,
+                dx: direccion.x, dy: direccion.y, dz: direccion.z
+              ), editor.esEscultura(id: impacto.piezaId) else { return false }
+        seleccionar(impacto.piezaId)
+        let esInflado = modoBrochaOrganica == "INFLAR"
+        let desplazamiento = esInflado ? radioBrochaOrganica * 0.45 : 0
+        let cambiado = editor.aplicarBrochaOrganica(
+            id: impacto.piezaId, modo: esInflado ? "AGREGAR" : modoBrochaOrganica,
+            x: impacto.x + impacto.nx * desplazamiento,
+            y: impacto.y + impacto.ny * desplazamiento,
+            z: impacto.z + impacto.nz * desplazamiento,
+            radio: radioBrochaOrganica, simetriaX: simetriaBrochaOrganica
+        )
+        if cambiado { refrescar(recompilo: true) } else { aviso = editor.ultimoError }
+        return cambiado
+    }
+
+    /// Alisar, pellizcar y mover: las brochas que tocan el campo, no el conjunto.
+    ///
+    /// Alisar y pellizcar se sellan como las de volumen, muestra a muestra sobre la
+    /// superficie. Mover no: es un gesto de agarrar y tirar, así que el sitio se fija al
+    /// pulsar y lo que cambia con el ratón es el vector. Sin eso, arrastrar dejaría una
+    /// hilera de tirones cortos en lugar de un solo desplazamiento.
+    private func deformacionOrganica(
+        origen: SIMD3<Float>, direccion: SIMD3<Float>, continuando: Bool
+    ) -> Bool {
+        if modoBrochaOrganica == "MOVER" {
+            return arrastreOrganico(origen: origen, direccion: direccion, continuando: continuando)
+        }
+        guard let impacto = editor.senalar(
+            ox: origen.x, oy: origen.y, oz: origen.z,
+            dx: direccion.x, dy: direccion.y, dz: direccion.z
+        ), editor.esEscultura(id: impacto.piezaId) else { return false }
+        seleccionar(impacto.piezaId)
+        // El pellizco aprieta contra la normal de la superficie; el alisado no la usa y
+        // le llega igualmente, que es más barato que dos caminos casi idénticos.
+        let aplicado = editor.aplicarDeformacionOrganica(
+            id: impacto.piezaId, modo: modoBrochaOrganica,
+            x: impacto.x, y: impacto.y, z: impacto.z,
+            radio: radioBrochaOrganica, intensidad: fuerzaBrochaOrganica,
+            dx: impacto.nx, dy: impacto.ny, dz: impacto.nz,
+            simetriaX: simetriaBrochaOrganica, continuandoTrazo: continuando
+        )
+        if aplicado { refrescar(recompilo: true) } else { aviso = editor.ultimoError }
+        return aplicado
+    }
+
+    private func arrastreOrganico(
+        origen: SIMD3<Float>, direccion: SIMD3<Float>, continuando: Bool
+    ) -> Bool {
+        if !continuando || anclaDeArrastre == nil {
+            guard let impacto = editor.senalar(
+                ox: origen.x, oy: origen.y, oz: origen.z,
+                dx: direccion.x, dy: direccion.y, dz: direccion.z
+            ), editor.esEscultura(id: impacto.piezaId) else { return false }
+            seleccionar(impacto.piezaId)
+            // El plano de arrastre es el de la pantalla en el momento de agarrar: es el
+            // único en el que el cursor y el material se mueven a la vez. Fijarlo aquí y
+            // no recalcularlo evita que orbitar a medio gesto tuerza el tirón.
+            anclaDeArrastre = (
+                punto: SIMD3<Float>(impacto.x, impacto.y, impacto.z),
+                normal: -direccion,
+                pieza: impacto.piezaId
+            )
+            return true
+        }
+
+        guard let ancla = anclaDeArrastre else { return false }
+        let denominador = simd_dot(direccion, ancla.normal)
+        guard abs(denominador) > 1e-5 else { return false }
+        let t = simd_dot(ancla.punto - origen, ancla.normal) / denominador
+        guard t > 0 else { return false }
+        let destino = origen + direccion * t
+        let gesto = destino - ancla.punto
+
+        let aplicado = editor.aplicarDeformacionOrganica(
+            id: ancla.pieza, modo: "MOVER",
+            x: ancla.punto.x, y: ancla.punto.y, z: ancla.punto.z,
+            radio: radioBrochaOrganica, intensidad: 0,
+            dx: gesto.x, dy: gesto.y, dz: gesto.z,
+            simetriaX: simetriaBrochaOrganica, continuandoTrazo: true
+        )
+        if aplicado { refrescar(recompilo: true) } else { aviso = editor.ultimoError }
+        return aplicado
+    }
+
+    private func brochazo(origen: SIMD3<Float>, direccion: SIMD3<Float>, continuando: Bool) -> Bool {
+        if EstadoDeLaApp.brochasDeCampo.contains(modoBrochaOrganica) {
+            return deformacionOrganica(origen: origen, direccion: direccion, continuando: continuando)
+        }
+        return selloOrganico(origen: origen, direccion: direccion)
+    }
+
+    func empezarAEsculpir(origen: SIMD3<Float>, direccion: SIMD3<Float>) -> Bool {
+        guard modoBrochaOrganica != "NINGUNA" else { return false }
+        anclaDeArrastre = nil
+        let inicio = editor.abrirTransaccion()
+        inicioDelTrazoOrganico = inicio
+        if brochazo(origen: origen, direccion: direccion, continuando: false) { return true }
+        editor.revertirTransaccion(punto: inicio)
+        inicioDelTrazoOrganico = nil
+        anclaDeArrastre = nil
+        return false
+    }
+
+    func continuarEsculpiendo(origen: SIMD3<Float>, direccion: SIMD3<Float>) {
+        _ = brochazo(origen: origen, direccion: direccion, continuando: true)
+    }
+
+    func terminarDeEsculpir() {
+        editor.cerrarTransaccion()
+        inicioDelTrazoOrganico = nil
+        anclaDeArrastre = nil
+        refrescar(recompilo: true)
+    }
+
+    /// El plano espejo de la escultura seleccionada, contado para el panel.
+    var planoDeSimetria: (normal: SIMD3<Float>, punto: SIMD3<Float>)? {
+        guard esEsculturaSeleccionada else { return nil }
+        let v = editor.planoDeSimetriaDe(id: seleccion).map { $0.floatValue }
+        guard v.count == 6 else { return nil }
+        return (SIMD3<Float>(v[0], v[1], v[2]), SIMD3<Float>(v[3], v[4], v[5]))
+    }
+
+    /// La fuerza vive en rangos distintos según la brocha; al cambiar se recoloca.
+    func ajustarFuerzaAlModo() {
+        if modoBrochaOrganica != "PELLIZCAR", fuerzaBrochaOrganica < 0.05 {
+            fuerzaBrochaOrganica = 0.5
+        }
+    }
+
+    func aplicarEjeDeSimetria(_ eje: String) {
+        guard esEsculturaSeleccionada else { return }
+        // «Libre» no es un eje: es el plano que salga de la última cara señalada, que es
+        // la única forma de elegir uno oblicuo sin teclear tres números.
+        if eje == "LIBRE" { fijarSimetriaDesdeElPunto(); return }
+        ejeDeSimetriaOrganica = eje
+        if editor.fijarEjeDeSimetria(id: seleccion, eje: eje) {
+            refrescar(recompilo: true)
+        } else {
+            aviso = editor.ultimoError
+        }
+    }
+
+    /// El plano espejo desde la última cara señalada: normal y punto salen del picking.
+    func fijarSimetriaDesdeElPunto() {
+        guard esEsculturaSeleccionada, let p = ultimoPunto, let n = ultimaNormal else {
+            aviso = "Señala antes una cara: de ahí salen la normal y el punto del plano."
+            return
+        }
+        if editor.fijarPlanoDeSimetria(
+            id: seleccion, nx: n.x, ny: n.y, nz: n.z, px: p.x, py: p.y, pz: p.z
+        ) {
+            ejeDeSimetriaOrganica = "LIBRE"
+            refrescar(recompilo: true)
+        } else {
+            aviso = editor.ultimoError
+        }
+    }
+
+    /// Cuántas zonas guarda la escultura de la brocha elegida.
+    var zonasDeLaBrocha: Int {
+        guard esEsculturaSeleccionada,
+              EstadoDeLaApp.brochasDeCampo.contains(modoBrochaOrganica) else { return 0 }
+        return Int(editor.zonasDeEscultura(id: seleccion, modo: modoBrochaOrganica))
+    }
+
+    func limpiarZonasDeLaBrocha() {
+        guard esEsculturaSeleccionada,
+              EstadoDeLaApp.brochasDeCampo.contains(modoBrochaOrganica) else { return }
+        if editor.limpiarDeformacionOrganica(id: seleccion, modo: modoBrochaOrganica) {
+            refrescar(recompilo: true)
+        } else {
+            aviso = editor.ultimoError
+        }
+    }
+
     /// Último punto señalado en el viewport, en milímetros del mundo.
     /// Es lo que convierte «este canto» en coordenadas sin teclear ninguna.
     private(set) var ultimoPunto: (x: Float, y: Float, z: Float)?
+    private var inicioDelTrazoOrganico: Documento?
+    private var anclaDeArrastre: (punto: SIMD3<Float>, normal: SIMD3<Float>, pieza: String)?
 
     var puedeFiletear: Bool { ultimoPunto != nil }
+
+    func aplicarFusionOrganica(_ valor: Float) {
+        guard esEsculturaSeleccionada else { return }
+        _ = editor.fijarFusionDeEscultura(id: seleccion, fusionMm: valor)
+        if editor.ultimoError == nil {
+            fusionOrganica = valor
+            refrescar(recompilo: false)
+        } else {
+            aviso = editor.ultimoError
+        }
+    }
 
     /**
      Pone un filete en el último punto señalado.
@@ -676,6 +948,13 @@ final class EstadoDeLaApp: ObservableObject {
 
     func empezarEdicionContinua() { editor.confirmarEdicionContinua() }
 
+    /// Desata la pieza de su medida. No la mueve: deja de derivar su cota.
+    func soltarEncaje() {
+        guard !seleccion.isEmpty else { return }
+        _ = editor.soltarEncaje(piezaId: seleccion)
+        refrescar(recompilo: false)
+    }
+
     func aplicarTransform() {
         guard !seleccion.isEmpty else { return }
         let recompilo = editor.fijarTransform(
@@ -835,7 +1114,34 @@ final class EstadoDeLaApp: ObservableObject {
         nombreDeLaImagen = nil
     }
 
+    var tienePerfilSeleccionado: Bool {
+        !seleccion.isEmpty && editor.tienePerfil(id: seleccion)
+    }
+
+    func puntosDelPerfilSeleccionado() -> [CGPoint] {
+        guard tienePerfilSeleccionado else { return [] }
+        let valores = editor.contornoDe(id: seleccion).map { CGFloat(truncating: $0) }
+        return stride(from: 0, to: valores.count - 1, by: 2).map {
+            CGPoint(x: valores[$0], y: valores[$0 + 1])
+        }
+    }
+
+    func guardarPerfil(_ puntos: [CGPoint]) -> String? {
+        guard tienePerfilSeleccionado else { return "Selecciona una extrusión, revolución o barrido." }
+        let coordenadas = puntos.flatMap {
+            [KotlinFloat(float: Float($0.x)), KotlinFloat(float: Float($0.y))]
+        }
+        _ = editor.fijarPuntosDelPerfil(id: seleccion, coordenadas: coordenadas)
+        if let error = editor.ultimoError { return error }
+        refrescar(recompilo: true)
+        return nil
+    }
+
     func construirConIA() {
+        if motorDeIA == .organico {
+            construirOrganicoConIA()
+            return
+        }
         let peticion = peticionIA.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !peticion.isEmpty, !iaTrabajando else { return }
         iaTrabajando = true
@@ -872,18 +1178,29 @@ final class EstadoDeLaApp: ObservableObject {
         // anotar primero pondría ese contador a cero.
         let contexto = editor.contextoConHilo(presupuestoDelHilo: 1200)
         let peticionCompleta = "Documento actual:\n\(contexto)\n\nPetición:\n\(peticion)"
-        let seleccion = aiSettings.selection
+        let versionBase = editor.versionDocumento
+        let documentoBase = editor.aJson()
+        let seleccionInicial = aiSettings.selection
         // El presupuesto se midió, no se estimó. Con una imagen y 1.500 tokens, el
         // modelo local con visión razonó el plan entero **y se quedó sin sitio antes
         // de escribir el JSON**: la respuesta se corta a mitad de un pensamiento y
         // desde fuera parece que el modelo no sabe hacerlo, cuando lo sabía.
         //
         // Los modelos de razonamiento gastan el grueso del presupuesto antes de
-        // empezar a responder, así que el local sube a 8.000, y a 12.000 cuando hay
-        // imagen —describir lo que ve se lleva otra tanda—. Es memoria del contexto,
-        // no dinero: en local no lo paga nadie.
+        // empezar a responder, así que hace falta sitio de sobra, y con imagen más
+        // —describir lo que ve se lleva otra tanda—.
+        //
+        // En local el presupuesto es además un tope de tiempo: el 9B genera a 46 tokens
+        // por segundo medidos, así que 8.000 tokens son casi tres minutos de reloj
+        // cuando se desboca repitiéndose y no para hasta agotarlos.
+        //
+        // Se probó a bajarlo a 4.000 para acortar esas desbocadas y **se midió que
+        // costaba caro**: dos casos del banco se cayeron por quedarse sin sitio, y no
+        // eran desbocadas sino planes largos y buenos —un contorno entero ocupa—.
+        // Acortar la correa a todos castiga justo a los que la necesitan, así que el
+        // freno del desbocamiento tiene que reconocer el bucle, no recortar a ciegas.
         let presupuesto: Int
-        if seleccion.provider == .openCodeGo {
+        if seleccionInicial.provider == .openCodeGo {
             presupuesto = imagen == nil ? 12_000 : 16_000
         } else {
             presupuesto = imagen == nil ? 8_000 : 12_000
@@ -891,6 +1208,7 @@ final class EstadoDeLaApp: ObservableObject {
 
         tareaIA = Task {
             do {
+                let seleccion = try await aiSettings.selectionForRequest(withImage: imagen != nil)
                 var mensaje = peticionCompleta
                 var aceptado: PlanInterpretado?
                 var ultimoMotivo = "el modelo no llegó a responder"
@@ -899,12 +1217,11 @@ final class EstadoDeLaApp: ObservableObject {
                 // Se le devuelven las medidas del resultado hasta que la pieza se
                 // sostenga, y solo entonces se le enseña la propuesta al usuario.
                 var reparos: [String] = []
-                var ultimaRespuesta = ""
-                var rondasGastadas = 0
                 var cosido: PlanDeModelado?
+                var respuestaAceptada = ""
+                var rondaAceptada = 0
 
                 for ronda in 1...Self.rondasDeCorreccion {
-                    rondasGastadas = ronda
                     try Task.checkCancellation()
                     if ronda > 1 { resultadoIA = "Corrigiendo el plan (intento \(ronda))…" }
                     // La imagen viaja en todas las rondas, no solo en la primera: si
@@ -916,8 +1233,9 @@ final class EstadoDeLaApp: ObservableObject {
                         maxTokens: presupuesto, imagen: imagen
                     )
                     try Task.checkCancellation()
-                    ultimaRespuesta = texto
-
+                    guard editor.versionDocumento == versionBase else {
+                        throw LocalAssistantError.documentChanged
+                    }
                     let leido = editor.interpretarPlan(respuesta: texto, edicion: esOrdenDeEdicion)
                     guard leido.aceptado else {
                         ultimoMotivo = leido.motivoDelRechazo ?? "formato no reconocido"
@@ -927,18 +1245,40 @@ final class EstadoDeLaApp: ObservableObject {
                         continue
                     }
 
-                    resultadoIA = "Comprobando la pieza…"
+                    if leido.requiereDatos {
+                        let preguntas = leido.preguntas.filter { !$0.isEmpty }
+                        let textoDeAclaracion = preguntas.joined(separator: "\n")
+                        editor.anotarPeticion(texto: peticion)
+                        editor.anotarAclaracion(texto: textoDeAclaracion)
+                        resultadoIA = textoDeAclaracion
+                        iaTrabajando = false
+                        return
+                    }
+
+                    // Dice «y mirándola» porque desde que existe el crítico visual la
+                    // espera puede pasar de un segundo a diez: se dibujan cuatro vistas
+                    // y las juzga un segundo modelo. Un mensaje que no cuenta lo que
+                    // tarda convierte una comprobación en una aplicación colgada.
+                    resultadoIA = "Comprobando la pieza y mirándola…"
                     let revision = await Self.revisar(
                         respuesta: texto,
-                        documento: editor.aJson(),
+                        documento: documentoBase,
                         perfil: perfilDeFabricacion,
-                        edicion: esOrdenDeEdicion
+                        edicion: esOrdenDeEdicion,
+                        peticion: peticion,
+                        referencia: imagen,
+                        seleccion: seleccion
                     )
                     try Task.checkCancellation()
+                    guard editor.versionDocumento == versionBase else {
+                        throw LocalAssistantError.documentChanged
+                    }
                     reparos = revision.motivos
                     cosido = revision.cosido
 
                     aceptado = leido
+                    respuestaAceptada = texto
+                    rondaAceptada = ronda
                     if reparos.isEmpty { break }
 
                     ultimoMotivo = reparos.joined(separator: " · ")
@@ -962,11 +1302,12 @@ final class EstadoDeLaApp: ObservableObject {
                     registro: Propuesta(
                         id: UUID().uuidString,
                         peticion: peticion,
-                        plan: ultimaRespuesta,
-                        rondas: rondasGastadas,
+                        plan: respuestaAceptada,
+                        rondas: rondaAceptada,
                         reparos: reparos
                     ),
                     plan: aplicable,
+                    versionDocumento: versionBase,
                     lineas: lineas,
                     reemplaza: leido.reemplaza,
                     resumen: leido.resumen.isEmpty ? peticion : leido.resumen,
@@ -975,6 +1316,7 @@ final class EstadoDeLaApp: ObservableObject {
                     cosidas: max(0, aplicable.operaciones.count - plan.operaciones.count),
                     aceptadas: Set(lineas.map { Int($0.indice) })
                 )
+                previsualizar(propuestaPendiente)
                 resultadoIA = nil
             } catch is CancellationError {
                 resultadoIA = "Creación cancelada; no se aplicaron cambios incompletos."
@@ -987,6 +1329,78 @@ final class EstadoDeLaApp: ObservableObject {
     }
 
     func cancelarIA() { tareaIA?.cancel() }
+
+    private func construirOrganicoConIA() {
+        let peticion = peticionIA.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !peticion.isEmpty, !iaTrabajando else { return }
+        iaTrabajando = true
+        resultadoIA = "Diseñando la anatomía de la figura…"
+        propuestaOrganica = nil
+        tareaIA?.cancel()
+        let imagen = imagenDeReferencia
+        let medida = medidaDeReferencia.trimmingCharacters(in: .whitespacesAndNewlines)
+        let objetivoId = esEsculturaSeleccionada ? seleccion : nil
+        let esculturaActual = objetivoId.flatMap { editor.contratoDeEscultura(id: $0) }
+
+        tareaIA = Task {
+            do {
+                let seleccion = try await aiSettings.selectionForRequest(withImage: imagen != nil)
+                let escala = medida.isEmpty ? "" : "\nMedida real conocida: \(medida)"
+                let contexto = esculturaActual.map {
+                    "\nEscultura actual editable. Devuelve el contrato COMPLETO modificado, conservando ids que no cambien:\n\($0)"
+                } ?? ""
+                let respuesta = try await AsistenteLocal.pedirPlan(
+                    system: MotorOrganico.shared.instrucciones(),
+                    user: peticion + escala + contexto,
+                    selection: seleccion,
+                    maxTokens: imagen == nil ? 8_000 : 12_000,
+                    imagen: imagen
+                )
+                try Task.checkCancellation()
+                let leido = MotorOrganico.shared.interpretar(respuesta: respuesta)
+                guard leido.aceptado, let contrato = leido.contratoCanonico else {
+                    throw LocalAssistantError.invalidPlan(leido.motivo ?? "contrato orgánico inválido")
+                }
+                propuestaOrganica = PropuestaOrganica(
+                    nombre: leido.nombre.isEmpty ? "Figura orgánica" : leido.nombre,
+                    contrato: contrato,
+                    objetivoId: objetivoId
+                )
+                resultadoIA = "Anatomía lista: revisa y genera la malla."
+            } catch is CancellationError {
+                resultadoIA = "Generación orgánica cancelada."
+            } catch {
+                resultadoIA = nil
+                aviso = error.localizedDescription
+            }
+            iaTrabajando = false
+        }
+    }
+
+    func descartarPropuestaOrganica() {
+        propuestaOrganica = nil
+        resultadoIA = nil
+    }
+
+    func aceptarPropuestaOrganica() {
+        guard let propuesta = propuestaOrganica, !iaTrabajando else { return }
+        let aplicado = propuesta.objetivoId.map {
+            editor.reemplazarEscultura(id: $0, contratoCanonico: propuesta.contrato)
+        } ?? editor.anadirEscultura(contratoCanonico: propuesta.contrato, padreId: nil)
+        if aplicado {
+            propuestaOrganica = nil
+            resultadoIA = "Escultura nativa añadida; puedes retocarla con las brochas."
+            refrescar(recompilo: true)
+            renderizador?.encuadrar()
+            if analizarAlCrear { analizarFabricacion() }
+        } else {
+            aviso = editor.ultimoError ?? "No se pudo añadir la escultura."
+        }
+    }
+
+    var esEsculturaSeleccionada: Bool {
+        !seleccion.isEmpty && editor.esEscultura(id: seleccion)
+    }
 
     // MARK: El hilo
 
@@ -1008,6 +1422,33 @@ final class EstadoDeLaApp: ObservableObject {
     }
 
     // MARK: Decidir sobre la propuesta
+
+    /// Pone —o quita— el fantasma de la propuesta en el viewport.
+    ///
+    /// Hasta hoy la propuesta se leía en una lista y se aceptaba a ciegas: la única
+    /// forma de saber qué iba a pasar era leer «Crea un cilindro de radio 8» y
+    /// figurárselo. Ahora se ve sobre la pieza, en verde lo que se añade y en rojo lo
+    /// que se quita, con el mismo `evaluar` que se exportaría.
+    ///
+    /// Se manda lo **marcado**, no la propuesta entera: las casillas cambian lo que se
+    /// aplicaría, así que tienen que cambiar lo que se ve.
+    private func previsualizar(_ propuesta: PropuestaPendiente?) {
+        let recompilo: Bool
+        if let p = propuesta {
+            recompilo = editor.previsualizar(
+                plan: p.plan,
+                aceptadas: p.todasMarcadas
+                    ? nil
+                    : p.aceptadas.sorted().map { KotlinInt(int: Int32($0)) },
+                nombrePerfil: perfilDeFabricacion
+            )
+        } else {
+            recompilo = editor.previsualizar(
+                plan: nil, aceptadas: nil, nombrePerfil: perfilDeFabricacion
+            )
+        }
+        renderizador?.sincronizar(recompilar: recompilo)
+    }
 
     /// Marca o desmarca una operación, arrastrando lo que dependa de ella.
     ///
@@ -1035,17 +1476,20 @@ final class EstadoDeLaApp: ObservableObject {
             )
         }
         propuestaPendiente = p
+        previsualizar(p)
     }
 
     func marcarTodasLasOperaciones(_ todas: Bool) {
         guard var p = propuestaPendiente else { return }
         p.aceptadas = todas ? Set(p.lineas.map { Int($0.indice) }) : []
         propuestaPendiente = p
+        previsualizar(p)
     }
 
     func descartarPropuesta() {
         guard let p = propuestaPendiente else { return }
         propuestaPendiente = nil
+        previsualizar(nil)
         anotar(p.registro, desenlace: "DESCARTADO", rechazadas: p.lineas.map { $0.texto })
         // Un descarte también es hilo, y del más informativo: «pediste esto, te propuse
         // aquello y lo tiraste entero». Callarlo dejaría al modelo repitiendo en el
@@ -1063,15 +1507,24 @@ final class EstadoDeLaApp: ObservableObject {
     func aceptarPropuesta() {
         guard let p = propuestaPendiente, !p.ningunaMarcada else { return }
         propuestaPendiente = nil
+        // Antes de aplicar, no después: el shader se regenera dentro de `aplicarParte`,
+        // y con el fantasma todavía puesto la pieza recién aceptada saldría pintada de
+        // verde sobre sí misma hasta el siguiente cambio.
+        previsualizar(nil)
 
-        let resultado = editor.aplicarParte(
+        let resultado = editor.aplicarParteEnVersion(
             plan: p.plan,
             aceptadas: p.aceptadas.sorted().map { KotlinInt(int: Int32($0)) },
+            versionEsperada: p.versionDocumento,
             nombrePerfil: perfilDeFabricacion
         )
         guard resultado.exito else {
-            aviso = resultado.error ?? "no se pudo aplicar la propuesta"
-            anotar(p.registro, desenlace: "DESCARTADO")
+            if resultado.error?.contains("documento cambió") == true {
+                resultadoIA = resultado.error
+            } else {
+                aviso = resultado.error ?? "no se pudo aplicar la propuesta"
+                anotar(p.registro, desenlace: "DESCARTADO")
+            }
             return
         }
 
@@ -1117,10 +1570,19 @@ final class EstadoDeLaApp: ObservableObject {
     /// intención se dice primero, y porque un copiloto que malinterpreta una orden
     /// de edición como generación tiraría la pieza entera.
     private func esPeticionDeCrear(_ peticion: String) -> Bool {
-        let primera = peticion.lowercased()
-            .trimmingCharacters(in: .punctuationCharacters)
+        let normalizada = peticion.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        let primera = normalizada
             .split(separator: " ").first.map(String.init) ?? ""
-        return ["crea", "crear", "haz", "hacer", "hazme", "haceme", "nuevo", "nueva", "diseña", "diseñar"].contains(primera)
+        if ["crea", "crear", "haz", "hacer", "hazme", "haceme", "nuevo", "nueva", "diseña", "diseñar"].contains(primera) {
+            return true
+        }
+        return [
+            "quiero crear", "quiero diseñar", "quiero hacer",
+            "necesito crear", "necesito diseñar",
+            "me gustaría crear", "me gustaria crear",
+            "me gustaría diseñar", "me gustaria diseñar"
+        ].contains { normalizada.hasPrefix($0) }
     }
 
     /// Una propuesta de la IA a la espera de saber en qué acabó.
@@ -1178,7 +1640,10 @@ final class EstadoDeLaApp: ObservableObject {
         respuesta: String,
         documento: String,
         perfil: String,
-        edicion: Bool
+        edicion: Bool,
+        peticion: String,
+        referencia: ImagenDeReferencia?,
+        seleccion: AISelection
     ) async -> Revision {
         await Task.detached(priority: .userInitiated) {
             let aislado = Editor(inicial: Documento.companion.vacio())
@@ -1186,16 +1651,35 @@ final class EstadoDeLaApp: ObservableObject {
             guard let plan = aislado.interpretarPlan(respuesta: respuesta, edicion: edicion).plan else {
                 return Revision(motivos: [], cosido: nil)
             }
-            let revision = aislado.revisarPlan(plan: plan, nombrePerfil: perfil)
-            if revision.motivos.isEmpty { return Revision(motivos: [], cosido: nil) }
+
+            // La post-condición de cotas va **antes** de mirar los defectos, y aparte:
+            // una pieza del tamaño equivocado no tiene ningún defecto que el revisor
+            // pueda ver. El plan es válido, la geometría está limpia y la pieza mide
+            // otra cosa; si esto esperara a que hubiera reparos, el caso no se
+            // arreglaría nunca porque no los hay.
+            let acotado = aislado.acotarPlan(plan: plan, peticion: peticion, nombrePerfil: perfil)
+            let base = acotado ?? plan
+
+            let revision = aislado.revisarPlan(plan: base, nombrePerfil: perfil)
+            if revision.motivos.isEmpty {
+                // Los números están limpios. Falta lo único que los números no dicen:
+                // si la pieza **es** la que se pidió. Va aquí y no antes porque dibujar
+                // y preguntar cuesta una carga de modelo y una inferencia, y gastarlas
+                // en un plan que ya se sabe roto es tirarlas.
+                let aLaVista = await CriticaVisual.reparos(
+                    editor: aislado, plan: base, peticion: peticion,
+                    perfil: perfil, referencia: referencia, seleccion: seleccion
+                )
+                return Revision(motivos: aLaVista, cosido: acotado)
+            }
 
             // El revisor no solo mide: cuando lo que falla es que dos piezas no se
             // tocan, sabe qué operación las une. Aplicarla aquí ahorra una ronda de
             // inferencia entera y, sobre todo, no depende de que el modelo copie
             // bien una línea de JSON. Si el cosido no arregla nada, `coserPlan`
             // devuelve nil y el fallo sigue su camino hacia la ronda de corrección.
-            guard let cosido = aislado.coserPlan(plan: plan, nombrePerfil: perfil) else {
-                return Revision(motivos: revision.motivos, cosido: nil)
+            guard let cosido = aislado.coserPlan(plan: base, nombrePerfil: perfil) else {
+                return Revision(motivos: revision.motivos, cosido: acotado)
             }
             return Revision(
                 motivos: aislado.revisarPlan(plan: cosido, nombrePerfil: perfil).motivos,
@@ -1352,8 +1836,10 @@ private let operaciones: [(String, String, String)] = [
     ("DIFERENCIA", "Diferencia", "minus.circle"),
     ("INTERSECCION", "Intersección", "circle.circle"),
     ("VACIADO", "Vaciado", "square.on.square.dashed"),
+    ("DESFASE", "Desfase", "arrow.up.left.and.arrow.down.right"),
     ("SIMETRIA", "Simetría", "arrow.left.and.right"),
     ("REPETICION", "Repetición", "square.grid.3x1.below.line.grid.1x2"),
+    ("REPETICION_CIRCULAR", "Patrón circular", "circle.grid.3x3"),
 ]
 
 struct VistaPrincipal: View {
@@ -1364,6 +1850,7 @@ struct VistaPrincipal: View {
     @State private var paraQueSirve = ""
     @State private var medidaClave = ""
     @State private var modoAvanzado = false
+    @State private var editandoPerfil = false
     /// Radio del próximo filete. 1,5 mm es lo que aguanta una pared impresa normal sin
     /// comerse el canto.
     @State private var radioDeFilete: Float = 1.5
@@ -1390,6 +1877,13 @@ struct VistaPrincipal: View {
                         estado.empezarAMoverPlano(origen: origen, direccion: direccion)
                     },
                     alMoverPlano: { estado.moverPlano(milimetros: $0) },
+                    alEmpezarAEsculpir: { origen, direccion in
+                        estado.empezarAEsculpir(origen: origen, direccion: direccion)
+                    },
+                    alContinuarEsculpiendo: { origen, direccion in
+                        estado.continuarEsculpiendo(origen: origen, direccion: direccion)
+                    },
+                    alTerminarDeEsculpir: { estado.terminarDeEsculpir() },
                     alSoltarStl: { estado.importarMallaDesde(ruta: $0) }
                 )
                 .contextMenu { menuDelViewport }
@@ -1415,6 +1909,13 @@ struct VistaPrincipal: View {
         .frame(minWidth: 1080, minHeight: 640)
         .toolbar { barraDeHerramientas }
         .sheet(isPresented: $mostrarGuia) { guiaDeCreacion }
+        .sheet(isPresented: $editandoPerfil) {
+            EditorVisualDePerfil(
+                puntosIniciales: estado.puntosDelPerfilSeleccionado(),
+                alGuardar: { estado.guardarPerfil($0) },
+                alCerrar: { editandoPerfil = false }
+            )
+        }
     }
 
     // MARK: Barra de herramientas
@@ -1490,27 +1991,31 @@ struct VistaPrincipal: View {
             HStack {
                 Label(estado.hiloEnCurso == nil ? "Crea describiendo" : "Seguimos con la pieza",
                       systemImage: "sparkles")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 AIModelSelector(settings: estado.aiSettings)
             }
+            Picker("Motor", selection: $estado.motorDeIA) {
+                ForEach(MotorDeIA.allCases) { motor in Text(motor.rawValue).tag(motor) }
+            }
+            .pickerStyle(.segmented)
             // Que el hilo se vea. Una memoria invisible es peor que ninguna: el usuario
             // escribe «más grueso» sin saber si eso significa algo, y si no funcionara
             // no tendría forma de saber por qué.
             if let hilo = estado.hiloEnCurso {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.turn.down.right")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+                        .font(Tipo.pie)
+                        .foregroundStyle(Tinta.apagado)
                     Text(hilo)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                        .font(Tipo.menor)
+                        .foregroundStyle(Tinta.cota)
                         .lineLimit(1).truncationMode(.tail)
                     Spacer(minLength: 0)
                     Button("Empezar de cero") { estado.olvidarElHilo() }
                         .buttonStyle(.plain)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                        .font(Tipo.menor)
+                        .foregroundStyle(Tinta.apagado)
                         .help("El modelo deja de tener en cuenta lo hablado hasta ahora")
                 }
             }
@@ -1536,16 +2041,16 @@ struct VistaPrincipal: View {
             HStack(spacing: 8) {
                 if let nombre = estado.nombreDeLaImagen {
                     Label(nombre, systemImage: "photo")
-                        .font(.system(size: 10))
+                        .font(Tipo.menor)
                         .lineLimit(1).truncationMode(.middle)
                         .frame(maxWidth: 150, alignment: .leading)
                     Button { estado.quitarImagen() } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .buttonStyle(.plain).foregroundStyle(Tinta.cota)
                         .help("Quitar la imagen")
 
                     TextField("Medida real, p. ej. «el ancho son 80 mm»", text: $estado.medidaDeReferencia)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11))
+                        .font(Tipo.cuerpo)
                         .help("Una foto no tiene escala. Da una cota que conozcas y Yunkil ajusta el resto en proporción.")
                 } else {
                     Button {
@@ -1560,24 +2065,41 @@ struct VistaPrincipal: View {
             }
             if estado.nombreDeLaImagen != nil, let aviso = estado.aiSettings.avisoDeImagen {
                 Label(aviso, systemImage: "exclamationmark.triangle")
-                    .font(.system(size: 9)).foregroundStyle(.orange).lineLimit(2)
+                    .font(Tipo.pie).foregroundStyle(Tinta.riesgo).lineLimit(2)
             }
             if estado.nombreDeLaImagen != nil,
                estado.medidaDeReferencia.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text("Sin una medida real, la pieza saldrá con las proporciones correctas pero a un tamaño cualquiera; Yunkil dirá qué cota necesita.")
-                    .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(2)
+                    .font(Tipo.pie).foregroundStyle(Tinta.cota).lineLimit(2)
             }
             HStack(spacing: 6) {
-                Button("Diseñar conmigo…") { mostrarGuia = true }
-                Button("Caja a medida") { estado.peticionIA = "Crea una caja hueca imprimible con tapa, pregúntame las medidas que falten" }
-                Button("Soporte de móvil") { estado.peticionIA = "Crea un soporte estable para mi móvil, pregúntame sus medidas" }
-                Button("Adaptador") { estado.peticionIA = "Crea un adaptador entre dos medidas, pregúntame los diámetros" }
+                if estado.motorDeIA == .parametrico {
+                    Button("Diseñar conmigo…") { mostrarGuia = true }
+                    Button("Caja a medida") { estado.peticionIA = "Crea una caja hueca imprimible con tapa, pregúntame las medidas que falten" }
+                    Button("Soporte de móvil") { estado.peticionIA = "Crea un soporte estable para mi móvil, pregúntame sus medidas" }
+                    Button("Adaptador") { estado.peticionIA = "Crea un adaptador entre dos medidas, pregúntame los diámetros" }
+                } else {
+                    Button("Personaje estilizado") { estado.peticionIA = "Crea una figura estilizada de pie, expresiva y fácil de imprimir" }
+                    Button("Criatura desde imagen") { estado.peticionIA = "Reconstruye el personaje de la imagen como figura 3D estilizada" }
+                }
             }
             .buttonStyle(.bordered).controlSize(.mini)
-            if let resultado = estado.resultadoIA {
-                Text(resultado).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+            if let propuesta = estado.propuestaOrganica {
+                HStack(spacing: 10) {
+                    Label(propuesta.nombre, systemImage: "figure.stand")
+                        .font(Tipo.cuerpo.weight(.semibold))
+                    Spacer()
+                    Button("Descartar") { estado.descartarPropuestaOrganica() }
+                    Button("Añadir escultura") { estado.aceptarPropuestaOrganica() }
+                        .buttonStyle(.borderedProminent).tint(.mint)
+                }
+                .padding(9)
+                .background(.black.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
             }
-            Text(estado.aiSettings.status).font(.system(size: 9)).foregroundStyle(.tertiary)
+            if let resultado = estado.resultadoIA {
+                Text(resultado).font(Tipo.menor).foregroundStyle(Tinta.cota).lineLimit(2)
+            }
+            Text(estado.aiSettings.status).font(Tipo.pie).foregroundStyle(Tinta.apagado)
         }
         .padding(13)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13))
@@ -1591,7 +2113,7 @@ struct VistaPrincipal: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Diseñemos tu pieza").font(.system(size: 25, weight: .bold, design: .rounded))
-                    Text("No necesitas saber modelado 3D. Cuéntame el problema.").foregroundStyle(.secondary)
+                    Text("No necesitas saber modelado 3D. Cuéntame el problema.").foregroundStyle(Tinta.cota)
                 }
                 Spacer()
                 Image(systemName: "wand.and.stars").font(.system(size: 34)).foregroundStyle(.mint)
@@ -1603,7 +2125,7 @@ struct VistaPrincipal: View {
 
             HStack {
                 Text("Yunkil propondrá geometría fabricable y podrás deshacerla con ⌘Z.")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                    .font(Tipo.menor).foregroundStyle(Tinta.cota)
                 Spacer()
                 Button("Cancelar") { mostrarGuia = false }
                 Button("Crear primera propuesta", systemImage: "sparkles") {
@@ -1656,7 +2178,7 @@ struct VistaPrincipal: View {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 24, height: 24)
             Text("Yunkil").font(.system(size: 19, weight: .semibold, design: .rounded))
             Text("sólidos por campo de distancia")
-                .font(.system(size: 9)).foregroundStyle(.tertiary)
+                .font(Tipo.pie).foregroundStyle(Tinta.apagado)
             Spacer()
         }
         .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
@@ -1671,11 +2193,11 @@ struct VistaPrincipal: View {
             }
 
             Image(systemName: fila.esOperacion ? "square.on.square" : "cube.fill")
-                .font(.system(size: 10))
+                .font(Tipo.menor)
                 .foregroundStyle(fila.esOperacion ? Color.orange : Color.teal)
 
             Text(fila.nombre)
-                .font(.system(size: 12))
+                .font(.system(size: 13))
                 .foregroundStyle(fila.visible ? .primary : .tertiary)
                 .strikethrough(!fila.visible, color: .secondary)
 
@@ -1685,13 +2207,13 @@ struct VistaPrincipal: View {
                 // Una operación sin hijos no aporta material: avisar aquí ahorra
                 // buscar por qué no se ve nada.
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 9)).foregroundStyle(.yellow)
+                    .font(Tipo.pie).foregroundStyle(.yellow)
                     .help("Operación sin piezas dentro")
             }
 
             Button { estado.alternarVisibilidad(fila.id) } label: {
                 Image(systemName: fila.visible ? "eye" : "eye.slash")
-                    .font(.system(size: 10))
+                    .font(Tipo.menor)
                     .foregroundStyle(fila.visible ? .secondary : .tertiary)
             }
             .buttonStyle(.plain)
@@ -1726,8 +2248,10 @@ struct VistaPrincipal: View {
             Button("Diferencia") { estado.seleccionar(fila.id); estado.envolver("DIFERENCIA") }
             Button("Intersección") { estado.seleccionar(fila.id); estado.envolver("INTERSECCION") }
             Button("Vaciado") { estado.seleccionar(fila.id); estado.envolver("VACIADO") }
+            Button("Desfase") { estado.seleccionar(fila.id); estado.envolver("DESFASE") }
             Button("Simetría") { estado.seleccionar(fila.id); estado.envolver("SIMETRIA") }
             Button("Repetición") { estado.seleccionar(fila.id); estado.envolver("REPETICION") }
+            Button("Patrón circular") { estado.seleccionar(fila.id); estado.envolver("REPETICION_CIRCULAR") }
         }
         .disabled(fila.id == estado.raizId)
         Divider()
@@ -1743,7 +2267,7 @@ struct VistaPrincipal: View {
             grupoDeBotones("Añadir primitiva", primitivas) { estado.anadir($0) }
             grupoDeBotones("Añadir contorno", contornos) { estado.anadir($0) }
             VStack(alignment: .leading, spacing: 3) {
-                Text("Traer de fuera").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Text("Traer de fuera").font(Tipo.menor.weight(.semibold)).foregroundStyle(Tinta.cota)
                 Button { estado.importarMalla() } label: {
                     Label("Importar STL…", systemImage: "square.and.arrow.down")
                 }
@@ -1783,13 +2307,13 @@ struct VistaPrincipal: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(titulo.uppercased())
-                .font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary).tracking(0.6)
+                .font(Tipo.rotulo).foregroundStyle(Tinta.apagado).tracking(0.6)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 3), spacing: 4) {
                 ForEach(elementos, id: \.0) { tipo, etiqueta, _ in
                     Button(etiqueta) { accion(tipo) }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                        .font(.system(size: 10))
+                        .font(Tipo.menor)
                 }
             }
         }
@@ -1810,7 +2334,7 @@ struct VistaPrincipal: View {
         } else {
             Text(estado.nombre)
             Divider()
-            Button("Filete de \(String(format: "%.1f", radioDeFilete)) mm aquí") {
+            Button("Filete de \(Cifra.texto(radioDeFilete, decimales: 1)) mm aquí") {
                 estado.filetearEnElPuntoSenalado(radioDeFilete)
             }
             .disabled(!estado.puedeFiletear)
@@ -1855,25 +2379,25 @@ struct VistaPrincipal: View {
     private var seccionDeFilete: some View {
         seccion("Filete") {
             if estado.seleccionTieneFilete {
-                Text("Canto redondeado \(String(format: "%.1f", estado.radioDelFilete)) mm")
-                    .font(.system(size: 11))
+                Text("Canto redondeado \(Cifra.texto(estado.radioDelFilete, decimales: 1)) mm")
+                    .font(Tipo.cuerpo)
                 Button("Quitar filete") { estado.quitarFilete() }
-                    .font(.system(size: 11))
+                    .font(Tipo.cuerpo)
             } else if estado.puedeFiletear {
                 HStack(spacing: 6) {
-                    Text("Radio").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text("Radio").font(Tipo.menor).foregroundStyle(Tinta.cota)
                     TextField("mm", value: $radioDeFilete, format: .number)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 52)
-                        .font(.system(size: 11))
+                        .font(Tipo.cuerpo)
                     Button("Aquí") { estado.filetearEnElPuntoSenalado(radioDeFilete) }
-                        .font(.system(size: 11))
+                        .font(Tipo.cuerpo)
                 }
                 Text("Se aplica en el último punto que hayas pinchado en la vista.")
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .font(Tipo.menor).foregroundStyle(Tinta.apagado)
             } else {
                 Text("Pincha el canto que quieras redondear y vuelve aquí.")
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .font(Tipo.menor).foregroundStyle(Tinta.apagado)
             }
         }
     }
@@ -1881,31 +2405,33 @@ struct VistaPrincipal: View {
     private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                if !modoAvanzado {
-                    seccion("Tu pieza") {
+                if !modoAvanzado && estado.filas.count <= 2 {
+                    seccion("Cómo va esto") {
                         Label("Describe arriba lo que necesitas", systemImage: "1.circle.fill")
                         Label("Ajusta aquí sus medidas", systemImage: "2.circle.fill")
                         Label("Exporta la pieza verificada", systemImage: "3.circle.fill")
                         Text("Yunkil mantiene el modelo editable aunque lo haya creado la IA.")
-                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                            .font(Tipo.menor).foregroundStyle(Tinta.cota)
                     }
                 }
 
                 if estado.seleccion.isEmpty {
-                    Text("Sin selección").font(.caption).foregroundStyle(.secondary)
+                    Text("Sin selección").font(.caption).foregroundStyle(Tinta.cota)
                 } else {
-                    seccion("Pieza") {
+                    seccionCon("Pieza", apunte: estado.tipoSeleccionado.capitalized) {
                         TextField("Nombre", text: Binding(
                             get: { estado.nombre },
                             set: { estado.nombre = $0 }
                         ))
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12))
+                        .font(.system(size: 13))
                         .focused($nombreEnfocado)
                         .onSubmit { estado.aplicarNombre(); nombreEnfocado = false }
 
-                        Text(estado.tipoSeleccionado.capitalized)
-                            .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+
+                    if let encaje = estado.encajeDescrito {
+                        seccion("Encaje") { panelDeEncaje(encaje) }
                     }
 
                     if !estado.parametros.isEmpty {
@@ -1916,11 +2442,129 @@ struct VistaPrincipal: View {
                         }
                     }
 
+                    if estado.esEsculturaSeleccionada {
+                        seccion("Escultura") {
+                            Picker("Brocha", selection: $estado.modoBrochaOrganica) {
+                                Text("Orbitar").tag("NINGUNA")
+                                Text("Añadir").tag("AGREGAR")
+                                Text("Inflar").tag("INFLAR")
+                                Text("Quitar").tag("QUITAR")
+                            }
+                            .pickerStyle(.segmented)
+                            // Las tres de abajo no suman ni restan bolas: deforman el
+                            // campo. Van en su propio selector porque también se usan de
+                            // otra manera —mover se arrastra, no se sella— y mezclarlas
+                            // con las de volumen escondería esa diferencia.
+                            Picker("Modelar", selection: $estado.modoBrochaOrganica) {
+                                Text("Alisar").tag("ALISAR")
+                                Text("Pellizcar").tag("PELLIZCAR")
+                                Text("Mover").tag("MOVER")
+                                Text("Proteger").tag("PROTEGER")
+                            }
+                            .pickerStyle(.segmented)
+                            .onChange(of: estado.modoBrochaOrganica) { _, _ in
+                                estado.ajustarFuerzaAlModo()
+                            }
+                            HStack {
+                                Text("Radio")
+                                Slider(value: $estado.radioBrochaOrganica, in: 0.5...20)
+                                Text("\(Cifra.texto(estado.radioBrochaOrganica, decimales: 1)) mm")
+                                    .monospacedDigit().frame(width: 58, alignment: .trailing)
+                            }
+                            if estado.modoBrochaOrganica == "ALISAR"
+                                || estado.modoBrochaOrganica == "PELLIZCAR"
+                                || estado.modoBrochaOrganica == "PROTEGER" {
+                                HStack {
+                                    Text("Fuerza")
+                                    // El pellizco es la única con signo: hacia un lado
+                                    // afila y hacia el otro ensancha, y las dos cosas son
+                                    // la misma operación con `k` cambiado de signo.
+                                    Slider(
+                                        value: $estado.fuerzaBrochaOrganica,
+                                        in: estado.modoBrochaOrganica == "PELLIZCAR" ? -1...1 : 0.05...1
+                                    )
+                                    Text(Cifra.texto(estado.fuerzaBrochaOrganica, decimales: 2))
+                                        .monospacedDigit().frame(width: 58, alignment: .trailing)
+                                }
+                                if estado.modoBrochaOrganica == "PELLIZCAR" {
+                                    Text("Positiva afila la cresta; negativa la ensancha.")
+                                        .font(Tipo.menor).foregroundStyle(Tinta.cota)
+                                }
+                            }
+                            if estado.zonasDeLaBrocha > 0 {
+                                HStack {
+                                    Text("\(estado.zonasDeLaBrocha) zonas guardadas")
+                                        .font(Tipo.menor).foregroundStyle(Tinta.cota)
+                                    Spacer()
+                                    Button("Quitarlas") { estado.limpiarZonasDeLaBrocha() }
+                                        .controlSize(.small)
+                                }
+                            }
+                            Toggle("Simetría al esculpir", isOn: $estado.simetriaBrochaOrganica)
+                            if estado.simetriaBrochaOrganica {
+                                Picker("Plano", selection: Binding(
+                                    get: { estado.ejeDeSimetriaOrganica },
+                                    set: { estado.aplicarEjeDeSimetria($0) }
+                                )) {
+                                    Text("Izq/der").tag("X")
+                                    Text("Arriba/abajo").tag("Y")
+                                    Text("Frente/fondo").tag("Z")
+                                    Text("Libre").tag("LIBRE")
+                                }
+                                .pickerStyle(.segmented)
+                                Button("Plano desde la cara señalada") {
+                                    estado.fijarSimetriaDesdeElPunto()
+                                }
+                                .controlSize(.small)
+                                if let plano = estado.planoDeSimetria {
+                                    Text(String(
+                                        format: "Normal %.2f, %.2f, %.2f · pasa por %.1f, %.1f, %.1f mm",
+                                        plano.normal.x, plano.normal.y, plano.normal.z,
+                                        plano.punto.x, plano.punto.y, plano.punto.z
+                                    ))
+                                    .font(Tipo.cifra)
+                                    .foregroundStyle(Tinta.cota)
+                                }
+                            }
+                            HStack {
+                                Text("Suavidad")
+                                Slider(
+                                    value: Binding(
+                                        get: { estado.fusionOrganica },
+                                        set: { estado.aplicarFusionOrganica($0) }
+                                    ),
+                                    in: 0.2...8,
+                                    onEditingChanged: { editando in
+                                        if editando { estado.empezarEdicionContinua() }
+                                    }
+                                )
+                                Text(Cifra.texto(estado.fusionOrganica, decimales: 1))
+                                    .monospacedDigit().frame(width: 30)
+                            }
+                            ayudaDeBrocha(estado.modoBrochaOrganica)
+                            .font(Tipo.menor).foregroundStyle(Tinta.cota)
+                        }
+                    }
+
+                    if estado.tienePerfilSeleccionado {
+                        seccion("Boceto") {
+                            Button {
+                                editandoPerfil = true
+                            } label: {
+                                Label("Editar perfil visualmente", systemImage: "pencil.and.outline")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.mint)
+                            Text("Rejilla, ajuste ortogonal y vértices en milímetros.")
+                                .font(Tipo.menor).foregroundStyle(Tinta.cota)
+                        }
+                    }
+
                     if estado.esBooleanaSeleccionada {
                         seccionDeFilete
                     }
 
-                    if estado.tipoSeleccionado == "SIMETRIA" || estado.tipoSeleccionado == "REPETICION" {
+                    if ["SIMETRIA", "REPETICION", "REPETICION_CIRCULAR"].contains(estado.tipoSeleccionado) {
                         seccion("Disposición") {
                             Picker("Eje", selection: Binding(
                                 get: { estado.eje },
@@ -1930,13 +2574,13 @@ struct VistaPrincipal: View {
                             }
                             .pickerStyle(.segmented)
 
-                            if estado.tipoSeleccionado == "REPETICION" {
+                            if estado.tipoSeleccionado == "REPETICION" || estado.tipoSeleccionado == "REPETICION_CIRCULAR" {
                                 Stepper(
                                     "Copias: \(estado.cuenta)",
                                     value: Binding(get: { estado.cuenta }, set: { estado.aplicarCuenta($0) }),
                                     in: 1...64
                                 )
-                                .font(.system(size: 11))
+                                .font(Tipo.cuerpo)
                             }
                         }
                     }
@@ -1956,10 +2600,10 @@ struct VistaPrincipal: View {
                     if modoAvanzado {
                         seccion("Envolver en") {
                             HStack(spacing: 5) {
-                                ForEach(["VACIADO", "SIMETRIA", "REPETICION"], id: \.self) { t in
+                                ForEach(["VACIADO", "DESFASE", "SIMETRIA", "REPETICION", "REPETICION_CIRCULAR"], id: \.self) { t in
                                     Button(t.capitalized) { estado.envolver(t) }
                                         .buttonStyle(.bordered).controlSize(.small)
-                                        .font(.system(size: 10))
+                                        .font(Tipo.menor)
                                 }
                             }
                         }
@@ -1972,29 +2616,29 @@ struct VistaPrincipal: View {
                         fila("Último cambio", estado.recompiloElUltimoCambio ? "recompiló" : "solo uniforms")
                         if let aviso = estado.aviso {
                             Text(aviso)
-                                .font(.system(size: 10)).foregroundStyle(.orange)
+                                .font(Tipo.menor).foregroundStyle(Tinta.riesgo)
                             .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 } else if let aviso = estado.aviso {
-                    Text(aviso).font(.system(size: 10)).foregroundStyle(.orange)
+                    Text(aviso).font(Tipo.menor).foregroundStyle(Tinta.riesgo)
                 }
 
-                seccion("Fabricar") {
+                seccion("Exportar") {
                     HStack {
-                        Text("Detalle").font(.system(size: 11))
+                        Text("Detalle").font(Tipo.cuerpo)
                         Slider(value: $estado.resolucionExportacion, in: 0.1...1.5, step: 0.05)
-                        Text(String(format: "%.2f mm", estado.resolucionExportacion))
-                            .font(.system(size: 10, design: .monospaced))
+                        Text("\(Cifra.texto(estado.resolucionExportacion, decimales: 2)) mm")
+                            .font(Tipo.cifra)
                             .frame(width: 62, alignment: .trailing)
                     }
-                    Text("Aproximadamente \(estado.celdasDeExportacion.formatted()) celdas")
-                        .font(.system(size: 9)).foregroundStyle(.tertiary)
+                    Text("Cuanto más fino, más tarda en generarse y verificarse la malla.")
+                        .pieDeAyuda()
 
                     if estado.exportando {
                         ProgressView(value: estado.progresoExportacion) {
                             Text("Generando y verificando la malla…")
-                                .font(.system(size: 10))
+                                .font(Tipo.menor)
                         }
                     } else {
                         Button("Exportar pieza…") { estado.exportarPieza() }
@@ -2005,8 +2649,8 @@ struct VistaPrincipal: View {
 
                     if let resultado = estado.resultadoExportacion {
                         Text(resultado)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                            .font(Tipo.cifra)
+                            .foregroundStyle(Tinta.cota)
                             .textSelection(.enabled)
                     }
                 }
@@ -2025,10 +2669,10 @@ struct VistaPrincipal: View {
                     .controlSize(.small)
                     .disabled(estado.peticionIA.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || estado.iaTrabajando)
                     if let resultado = estado.resultadoIA {
-                        Text(resultado).font(.system(size: 10)).foregroundStyle(.secondary)
+                        Text(resultado).font(Tipo.menor).foregroundStyle(Tinta.cota)
                     }
                     Text("Privado · Hearthia en este Mac · siempre deshacer con ⌘Z")
-                        .font(.system(size: 9)).foregroundStyle(.tertiary)
+                        .font(Tipo.pie).foregroundStyle(Tinta.apagado)
                 } }
 
                 Spacer(minLength: 0)
@@ -2066,8 +2710,8 @@ struct VistaPrincipal: View {
                 .help("Baja la pieza hasta apoyarla en el plato")
         }
 
-        Toggle("Analizar al crear con IA", isOn: $estado.analizarAlCrear)
-            .font(.system(size: 10)).controlSize(.mini)
+        Toggle(" Analizar al crear con IA", isOn: $estado.analizarAlCrear)
+            .font(Tipo.menor).controlSize(.mini)
             .onChange(of: estado.analizarAlCrear) { _, nuevo in
                 UserDefaults.standard.set(nuevo, forKey: "fab.auto")
             }
@@ -2077,15 +2721,15 @@ struct VistaPrincipal: View {
                 Image(systemName: informe.aptoParaImprimir ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                     .foregroundStyle(informe.aptoParaImprimir ? .green : .orange)
                 Text("Imprimibilidad \(informe.puntuacion)/100")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(Tipo.cuerpo.weight(.semibold))
                 Spacer()
             }
-            Text(informe.resumen).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(informe.resumen).font(Tipo.menor).foregroundStyle(Tinta.cota)
 
             fila("Volumen", String(format: "%.1f cm³", informe.metricas.volumen / 1000))
             fila("Base", String(format: "%.0f mm²", informe.metricas.areaDeContacto))
             fila("En voladizo", String(format: "%.0f %%", informe.metricas.fraccionEnVoladizo * 100))
-            fila("Pared mínima", String(format: "%.2f mm", informe.metricas.espesorMinimo))
+            fila("Pared mínima", "\(Cifra.texto(informe.metricas.espesorMinimo, decimales: 2)) mm")
 
             ForEach(Array(informe.hallazgos.enumerated()), id: \.offset) { _, hallazgo in
                 tarjetaDeHallazgo(hallazgo)
@@ -2093,10 +2737,10 @@ struct VistaPrincipal: View {
 
             if let mejor = estado.orientaciones.first, !mejor.esLaActual {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Mejor orientación").font(.system(size: 10, weight: .semibold))
+                    Text("Mejor orientación").font(Tipo.menor.weight(.semibold))
                     Text("\(mejor.descripcion): \(Int(mejor.fraccionEnVoladizo * 100)) % en voladizo, "
                          + "base de \(Int(mejor.areaDeContacto)) mm².")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .font(Tipo.menor).foregroundStyle(Tinta.cota)
                     Button("Orientar así") { estado.aplicarOrientacion(mejor) }
                         .controlSize(.small)
                 }
@@ -2105,7 +2749,7 @@ struct VistaPrincipal: View {
             }
         } else if !estado.analizando {
             Text("Sin analizar. El examen mide pared, voladizo, apoyo y encaje contra la impresora elegida.")
-                .font(.system(size: 9)).foregroundStyle(.tertiary)
+                .font(Tipo.pie).foregroundStyle(Tinta.apagado)
         }
     }
 
@@ -2113,15 +2757,15 @@ struct VistaPrincipal: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
                 Circle().fill(colorDe(hallazgo.severidad)).frame(width: 7, height: 7)
-                Text(hallazgo.titulo).font(.system(size: 11, weight: .semibold))
+                Text(hallazgo.titulo).font(Tipo.cuerpo.weight(.semibold))
                 Spacer()
                 Text(hallazgo.severidad.etiqueta)
-                    .font(.system(size: 9)).foregroundStyle(colorDe(hallazgo.severidad))
+                    .font(Tipo.pie).foregroundStyle(colorDe(hallazgo.severidad))
             }
             if let pieza = hallazgo.piezaNombre {
-                Text("en «\(pieza)»").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text("en «\(pieza)»").font(Tipo.menor).foregroundStyle(Tinta.cota)
             }
-            Text(hallazgo.detalle).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(hallazgo.detalle).font(Tipo.menor).foregroundStyle(Tinta.cota)
 
             if !hallazgo.correcciones.isEmpty {
                 HStack(spacing: 5) {
@@ -2139,20 +2783,37 @@ struct VistaPrincipal: View {
 
     private func colorDe(_ severidad: Severidad) -> Color {
         switch severidad {
-        case .fallara: .red
-        case .probable: .orange
-        default: .blue
+        case .fallara: Tinta.fallo
+        case .probable: Tinta.riesgo
+        default: Tinta.calibre
+        }
+    }
+
+    /// El encaje de la pieza, con la salida explícita para dejar de derivarla.
+    private func panelDeEncaje(_ texto: String) -> some View {
+        VStack(alignment: .leading, spacing: Hueco.corto) {
+            Text(texto)
+                .font(Tipo.cifra)
+                .foregroundStyle(Tinta.calibre)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("La cota sale de esta medida. Para cambiar la pieza, cambia la medida.")
+                .pieDeAyuda()
+            Button("Soltar encaje") { estado.soltarEncaje() }
+                .font(Tipo.menor)
         }
     }
 
     private func deslizador(_ p: Parametro) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack {
-                Text(p.etiqueta).font(.system(size: 11))
-                Spacer()
-                Text(String(format: "%.2f %@", p.valor, p.unidad))
-                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-            }
+        let gobernada = estado.clavesGobernadas.contains(p.clave)
+        return VStack(alignment: .leading, spacing: Hueco.corto) {
+            Cota(
+                etiqueta: p.etiqueta,
+                valor: Cifra.texto(p.valor, decimales: 2),
+                unidad: p.unidad,
+                procedencia: gobernada ? "la deriva el encaje" : nil,
+                gobernada: gobernada
+            )
+            if !gobernada {
             Slider(
                 value: Binding(
                     get: { p.valor },
@@ -2164,45 +2825,70 @@ struct VistaPrincipal: View {
                 // fotograma: si no, el historial quedaría inservible.
                 if empezando { estado.empezarEdicionContinua() }
             }
+            }
         }
     }
 
     private func campoNumerico(_ etiqueta: String, _ valor: Binding<Float>, unidad: String = "mm") -> some View {
         HStack {
-            Text(etiqueta).font(.system(size: 11)).frame(width: 52, alignment: .leading)
+            Text(etiqueta).font(Tipo.cuerpo).foregroundStyle(Tinta.cota)
+                .frame(width: 52, alignment: .leading)
             TextField("", value: valor, format: .number.precision(.fractionLength(0...2)))
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11, design: .monospaced))
+                .font(Tipo.cifraFuerte)
                 .multilineTextAlignment(.trailing)
                 .onSubmit { estado.aplicarTransform() }
-            Text(unidad).font(.system(size: 9)).foregroundStyle(.tertiary).frame(width: 18)
+            Text(unidad).font(Tipo.pie).foregroundStyle(Tinta.apagado)
+                .fixedSize()
+                .frame(width: 22, alignment: .leading)
         }
     }
 
     private var barraDeEstado: some View {
         Text(estado.estadoDelRender)
-            .font(.system(size: 11, weight: .medium, design: .monospaced))
+            .font(Tipo.cifraFuerte)
             .foregroundStyle(.white.opacity(0.85))
             .padding(.horizontal, 10).padding(.vertical, 6)
             .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
             .padding(12)
     }
 
+    /// Qué hace cada brocha, dicho donde se elige y no en un manual aparte.
+    private func ayudaDeBrocha(_ modo: String) -> Text {
+        switch modo {
+        case "NINGUNA": return Text("Elige una brocha y pincha la superficie.")
+        case "ALISAR":
+            return Text("Arrastra sobre un bulto para limarlo o sobre un surco para rellenarlo.")
+        case "PELLIZCAR":
+            return Text("Aprieta el material contra la normal y afila la cresta que señales.")
+        case "MOVER":
+            return Text("Agarra la superficie y tira: el material se estira sin partirse.")
+        case "PROTEGER":
+            return Text("Pinta las zonas que ninguna brocha posterior debe tocar. Se guardan con la figura.")
+        default:
+            return Text("Cada clic modifica volumen y se puede deshacer con ⌘Z.")
+        }
+    }
+
     @ViewBuilder
     private func seccion<C: View>(_ titulo: String, @ViewBuilder contenido: () -> C) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(titulo.uppercased())
-                .font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary).tracking(0.6)
+        seccionCon(titulo, apunte: nil, contenido: contenido)
+    }
+
+    /// Sección con un dato corto a la derecha del rótulo: el tipo de la pieza, el perfil.
+    private func seccionCon<C: View>(
+        _ titulo: String,
+        apunte: String?,
+        @ViewBuilder contenido: () -> C
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Hueco.medio) {
+            Rotulo(texto: titulo, apunte: apunte)
             contenido()
         }
     }
 
     private func fila(_ etiqueta: String, _ valor: String) -> some View {
-        HStack {
-            Text(etiqueta).font(.system(size: 11))
-            Spacer()
-            Text(valor).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-        }
+        Cota(etiqueta: etiqueta, valor: valor, unidad: "")
     }
 }
 

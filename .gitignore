@@ -3,3 +3,11 @@ build/
 core/build/
 .DS_Store
 *.xcuserstate
+.kotlin/
+local.properties
+.env*
+!.env.example
+*.db
+*.sqlite*
+*.log
+.idea/

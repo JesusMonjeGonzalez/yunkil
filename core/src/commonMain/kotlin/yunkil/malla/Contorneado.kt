@@ -119,7 +119,11 @@ class ContorneadoDual(
             val fila = y * (nx + 1)
             var x = 0
             while (x <= nx) {
-                val d = nodo.evaluar(Vec3(origen.x + x * resolucion, yy, zz))
+                val evaluado = nodo.evaluar(Vec3(origen.x + x * resolucion, yy, zz))
+                // Una superficie alineada con la rejilla puede producir, por cancelación,
+                // un damero de ±4e-8 mm. Clasificar esos residuos por signo crea cuatro
+                // caras sobre una misma arista dual. Cero es exterior de forma uniforme.
+                val d = if (abs(evaluado) <= resolucion * 1e-6f) 0f else evaluado
                 destino[fila + x] = d
                 x++
 

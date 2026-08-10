@@ -7,6 +7,8 @@ import yunkil.kernel.Aabb
 import yunkil.kernel.SdfNode
 import yunkil.kernel.Vec3
 import yunkil.malla.ContorneadoDual
+import yunkil.malla.Exportador
+import yunkil.malla.Malla
 import yunkil.malla.TopologiaDeMalla
 import yunkil.malla.estimarCeldas
 import yunkil.malla.resolucionSugerida
@@ -45,6 +47,16 @@ enum class Regla(val etiqueta: String) {
     VOLUMEN_DE_IMPRESION("Volumen de impresión"),
     INTERFERENCIA("Interferencia"),
     HOLGURA_DE_ENCAJE("Holgura de encaje"),
+
+    /**
+     * La holgura que el documento **declara**, comprobada sobre la geometría final.
+     *
+     * Es distinta de [HOLGURA_DE_ENCAJE], que mira si dos piezas del modelo se rozan.
+     * Esta compara contra una medida del mundo real que alguien dio, así que su fallo
+     * no es «estas dos se tocan» sino «esto no va a entrar donde dijiste».
+     */
+    ENCAJE_DECLARADO("Encaje declarado"),
+    MALLA_EXPORTABLE("Malla exportable"),
 }
 
 /** Lo que sabe hacer una corrección. La interfaz las traduce a llamadas del editor. */
@@ -124,6 +136,14 @@ data class InformeDeFabricacion(
      * abierta, y hasta que esto no estuvo aquí el usuario lo descubría al exportar.
      */
     val topologia: TopologiaDeMalla? = null,
+    /**
+     * Lo medido de cada encaje declarado, cumpla o no.
+     *
+     * Van todos y no solo los que fallan, por la misma razón por la que van las
+     * métricas: sin la lista, «no hay avisos de encaje» no distingue entre haberlos
+     * comprobado y no haber podido mirarlos.
+     */
+    val encajes: List<EncajeMedido> = emptyList(),
 ) {
     /** No se entrega una pieza con un `fallará` sin decirlo. */
     val aptoParaImprimir: Boolean get() = hallazgos.none { it.severidad == Severidad.FALLARA }
@@ -243,6 +263,15 @@ class AnalizadorFdm(
         val areaDeContacto = areaDePrimeraCapa()
         revisarBase(areaDeContacto, hallazgos)
         revisarVolumen(hallazgos)
+        revisarMallaExportable(malla, hallazgos)
+
+        // Las holguras declaradas se comprueban contra la pieza construida, no contra
+        // el plan que las declaró. Es lo único de este informe que compara el modelo
+        // con una medida del mundo real.
+        val encajesMedidos = documento
+            ?.let { VerificadorDeEncajes(it, nodo, perfil, resolucionDeAnalisis).medir() }
+            ?: emptyList()
+        hallazgos.addAll(avisosDeEncaje(encajesMedidos))
         alAvanzar?.invoke(1f)
 
         val metricas = MetricasDeFabricacion(
@@ -262,6 +291,7 @@ class AnalizadorFdm(
             perfil = perfil,
             metricas = metricas,
             topologia = malla.revisarTopologia(),
+            encajes = encajesMedidos,
             // Lo que va a fallar primero, y a igual severidad lo que más superficie afecta.
             hallazgos = hallazgos.sortedWith(
                 compareByDescending<Hallazgo> { it.severidad.peso }.thenByDescending { it.areaAfectada },
@@ -796,6 +826,70 @@ class AnalizadorFdm(
                 ),
             )
         }
+    }
+
+    /**
+     * ¿Saldría de aquí un archivo, o el certificado lo va a rechazar?
+     *
+     * Las demás reglas miden el **campo**: si la pieza es demasiado fina, si vuela, si
+     * dos piezas se pisan. Ninguna mira si la malla que sale del contorneado es un
+     * sólido entregable, y eso abría un hueco de los que hacen perder la confianza en
+     * una herramienta: el informe decía «apta para imprimir», el usuario le daba a
+     * exportar y el certificado se negaba a escribir el archivo por una razón que el
+     * informe nunca había mencionado. Dos verdades distintas sobre la misma pieza.
+     *
+     * La regla no reimplementa el examen: llama al **mismo** `examinar` que usa la
+     * exportación, sobre la misma malla que el análisis ya ha construido. Por eso no
+     * pueden divergir por un umbral que alguien cambie en un sitio y no en el otro.
+     *
+     * Lo que garantiza es una implicación, no una equivalencia: si el informe dice que
+     * la pieza es apta, el certificado a **esta** resolución la aprueba. Al revés no,
+     * y a propósito: exportar a una resolución más gruesa que la del análisis puede
+     * abrir agujeros que aquí no estaban, y por eso el aviso dice a qué resolución se
+     * ha medido en lugar de prometer que cualquier export saldrá bien.
+     */
+    private fun revisarMallaExportable(malla: Malla, salida: MutableList<Hallazgo>) {
+        val certificado = Exportador(nodo).examinar(malla, resolucionDeAnalisis, 0)
+        if (certificado.apto) return
+
+        val motivos = buildList {
+            if (certificado.salioVacia) {
+                add("no sale ni un triángulo a ${redondear(resolucionDeAnalisis, 3)} mm")
+            }
+            if (!certificado.cerrada) add("la superficie tiene agujeros")
+            if (!certificado.bienOrientada) add("hay caras del revés")
+            if (certificado.degenerados > 0) {
+                add("${certificado.degenerados} triángulos degenerados")
+            }
+            if (certificado.autoIntersecciones > 0) add("la superficie se cruza consigo misma")
+            val tope = maxOf(certificado.resolucion * 1.5f, 0.05f)
+            if (certificado.desviacionMaxima > tope) {
+                add(
+                    "la malla se separa ${redondear(certificado.desviacionMaxima, 3)} mm de la " +
+                        "forma exacta, y el tope es ${redondear(tope, 3)} mm",
+                )
+            }
+            if (certificado.volumenMalla <= 0f || certificado.volumenAnalitico <= 0f) {
+                add("el volumen medido es cero")
+            } else if (certificado.errorDeVolumen > 0.10f) {
+                add("el volumen se desvía un ${redondear(certificado.errorDeVolumen * 100f, 1)} %")
+            }
+        }
+
+        salida.add(
+            Hallazgo(
+                regla = Regla.MALLA_EXPORTABLE,
+                severidad = Severidad.FALLARA,
+                titulo = "No se puede exportar tal cual",
+                detalle = "Mallada a ${redondear(resolucionDeAnalisis, 3)} mm, la pieza no pasa el " +
+                    "certificado: ${motivos.joinToString("; ")}. El archivo no se escribiría. " +
+                    "Suele arreglarse exportando con más detalle o engordando la zona más fina.",
+                medido = certificado.desviacionMaxima,
+                umbral = maxOf(certificado.resolucion * 1.5f, 0.05f),
+                unidad = "mm",
+                areaAfectada = 0f,
+            ),
+        )
     }
 
     private fun revisarVolumen(salida: MutableList<Hallazgo>) {

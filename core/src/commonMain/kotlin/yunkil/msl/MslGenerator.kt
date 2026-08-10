@@ -1,6 +1,7 @@
 package yunkil.msl
 
 import yunkil.kernel.AcuerdoLocal
+import yunkil.kernel.AlisadoLocal
 import yunkil.kernel.Axis
 import yunkil.kernel.Barrido
 import yunkil.kernel.Caja
@@ -8,18 +9,26 @@ import yunkil.kernel.CampoDeMalla
 import yunkil.kernel.Capsula
 import yunkil.kernel.Cilindro
 import yunkil.kernel.Cono
+import yunkil.kernel.Cordon
 import yunkil.kernel.Diferencia
+import yunkil.kernel.Desfase
 import yunkil.kernel.Esfera
 import yunkil.kernel.Extrusion
 import yunkil.kernel.Interseccion
+import yunkil.kernel.ESTRELLA_TETRAEDRO
 import yunkil.kernel.ModoDeAcuerdo
+import yunkil.kernel.MoverLocal
+import yunkil.kernel.PellizcoLocal
 import yunkil.kernel.Repeticion
+import yunkil.kernel.RepeticionCircular
 import yunkil.kernel.Revolucion
 import yunkil.kernel.SdfNode
+import yunkil.kernel.PerfilDeAcuerdo
 import yunkil.kernel.Simetria
 import yunkil.kernel.Toro
 import yunkil.kernel.Transformado
 import yunkil.kernel.Union
+import yunkil.kernel.pasoSeguro
 import yunkil.kernel.preorden
 import yunkil.kernel.Vaciado
 
@@ -114,7 +123,22 @@ class MslGenerator {
         intArrayOf(0, 0, 1), intArrayOf(1, 0, 1), intArrayOf(0, 1, 1), intArrayOf(1, 1, 1),
     )
 
-    fun generar(raiz: SdfNode): ShaderGenerado {
+    /**
+     * @param fantasma árbol de la propuesta que se está mirando, o `null`.
+     *
+     * Con fantasma el shader lleva **dos** árboles: el documento en `yk_map` —que sigue
+     * siendo la verdad y la que comprueba la paridad— y la propuesta en `yk_fantasma`.
+     * El trazado avanza por el mínimo de los dos y el color de cada impacto sale de
+     * comparar los dos signos justo por debajo de la superficie: dentro de los dos es
+     * material que se queda, dentro solo del fantasma es material que se añade, dentro
+     * solo del documento es material que se quita. Eso a un B-rep le cuesta dos
+     * booleanas y aquí es restar dos distancias.
+     *
+     * Los dos buffers de uniforms viajan **concatenados**, en el mismo orden en que los
+     * empaquetan los dos árboles, así que el fantasma emite sus índices desplazados por
+     * el tamaño entero del primero.
+     */
+    fun generar(raiz: SdfNode, fantasma: SdfNode? = null): ShaderGenerado {
         // El preorden es el orden canónico: el de los uniforms y el de las cajas.
         // El mapa nodo → índice de caja lo comparten las dos versiones del cuerpo.
         val orden = raiz.preorden()
@@ -148,34 +172,139 @@ class MslGenerator {
         // preorden, el empaquetado y el shader no pueden desalinearse.
         val baseDeCajas = totalEscalares
         val numeroDeNodos = orden.size
+        val uniformsDelDocumento = totalEscalares + 6 * numeroDeNodos
 
+        // El fantasma se emite con el cursor arrancado donde acaba el buffer del
+        // documento —escalares **y** cajas—, que es exactamente donde lo deja la
+        // concatenación de los dos `empaquetarUniforms`. Sus campos horneados se numeran
+        // a continuación de los del documento por la misma razón que dentro de un árbol:
+        // el orden de enlace lo publica el generador, y si cada lado los numerara por su
+        // cuenta se pintaría una malla con los datos de otra.
+        val ordenFantasma = fantasma?.preorden() ?: emptyList()
+        val camposFantasma = ordenFantasma.filterIsInstance<CampoDeMalla>()
+        val cuerpoFantasma = StringBuilder()
+        var resultadoFantasma = ""
+        var uniformsDelFantasma = 0
+        if (fantasma != null) {
+            val escalaresFantasma = ordenFantasma.sumOf { it.escalares.size }
+            uniformsDelFantasma = escalaresFantasma + 6 * ordenFantasma.size
+            val cajas = HashMap<SdfNode, Int>().apply {
+                ordenFantasma.forEachIndexed { i, n -> put(n, i) }
+            }
+            val deCampo = HashMap<SdfNode, Int>().apply {
+                camposFantasma.forEachIndexed { i, n -> put(n, campos.size + i) }
+            }
+            val estadoFantasma = Estado().apply { cursorUniforms = uniformsDelDocumento }
+            resultadoFantasma = emitir(
+                fantasma, "p", cuerpoFantasma, estadoFantasma, podar = false,
+                cajas, uniformsDelDocumento + escalaresFantasma, deCampo,
+            )
+        }
+
+        // El orden importa: primero el fantasma —que **añade llamadas**— y después las
+        // texturas, que es quien le pone el parámetro a todas las llamadas que haya. Al
+        // revés, las del fantasma nacerían sin él y el shader no compilaría.
         val fuente = conCampos(
-            buildString {
-                append(PRELUDIO)
-                append("\nfloat yk_map(float3 p, constant float *u) {\n")
-                append(cuerpo)
-                append("    return $resultado;\n}\n")
-                append("\nfloat yk_marcha(float3 p, constant float *u) {\n")
-                append(cuerpoPodado)
-                append("    return $resultadoPodado;\n}\n")
-                append(RAYMARCHER)
-            },
-            campos.size,
+            conFantasma(
+                buildString {
+                    append(PRELUDIO)
+                    append("\nfloat yk_map(float3 p, constant float *u) {\n")
+                    append(cuerpo)
+                    append("    return $resultado;\n}\n")
+                    append("\nfloat yk_marcha(float3 p, constant float *u) {\n")
+                    append(cuerpoPodado)
+                    append("    return $resultadoPodado;\n}\n")
+                    if (fantasma != null) {
+                        append("\nfloat yk_fantasma(float3 p, constant float *u) {\n")
+                        append(cuerpoFantasma)
+                        append("    return $resultadoFantasma;\n}\n")
+                    }
+                    append(RAYMARCHER)
+                },
+                fantasma != null,
+            ),
+            campos.size + camposFantasma.size,
         )
 
         return ShaderGenerado(
             fuente = fuente,
-            numeroDeUniforms = totalEscalares + 6 * numeroDeNodos,
+            numeroDeUniforms = uniformsDelDocumento + uniformsDelFantasma,
             // Las mallas entran en la huella por su número **y su tamaño en celdas**: dos
             // documentos con la misma forma de árbol pero rejillas distintas necesitan
             // shaders distintos, porque las dimensiones van literales en el muestreo.
             huellaTopologica = VERSION_DEL_GENERADOR + huellaDe(raiz) +
-                campos.joinToString("") { "T${it.anchoEnCeldas}x${it.altoEnCeldas}x${it.fondoEnCeldas}" },
-            pasoSeguro = pasoSeguroDe(raiz),
-            campos = campos.map {
+                campos.joinToString("") { "T${it.anchoEnCeldas}x${it.altoEnCeldas}x${it.fondoEnCeldas}" } +
+                // El fantasma va en la huella porque es quien manda recompilar: sin esto
+                // la propuesta se enseñaría con el shader anterior —o sea, no se
+                // enseñaría— y nada lo diría.
+                (fantasma?.let {
+                    "F" + huellaDe(it) +
+                        camposFantasma.joinToString("") { c -> "T${c.anchoEnCeldas}x${c.altoEnCeldas}x${c.fondoEnCeldas}" }
+                } ?: ""),
+            // El trazado avanza por el mínimo de los dos campos, así que manda el más
+            // exigente: quedarse con el del documento dejaría agujeros justo en el canto
+            // que propone el fantasma.
+            pasoSeguro = minOf(pasoSeguroDe(raiz), fantasma?.let { pasoSeguroDe(it) } ?: 1f),
+            campos = (campos + camposFantasma).map {
                 CampoEnShader(it.anchoEnCeldas, it.altoEnCeldas, it.fondoEnCeldas, it.muestras)
             },
         )
+    }
+
+    /**
+     * Enchufa el fantasma al raymarcher, si lo hay.
+     *
+     * Por sustitución y no con una plantilla aparte, por lo mismo que las texturas: una
+     * segunda copia del raymarcher se queda desactualizada el día que alguien toque la
+     * primera, y esa divergencia no se nota hasta que la pantalla dibuja mal.
+     *
+     * No hay bandera en la escena a propósito. El shader con fantasma solo existe
+     * mientras hay una propuesta en pantalla —al aceptarla o descartarla se regenera sin
+     * él—, así que un `if` por píxel sería pagar en todos los fotogramas por un estado
+     * que ya está en la huella. Y sin fantasma la fuente no cambia ni un byte.
+     */
+    private fun conFantasma(fuente: String, hay: Boolean): String {
+        if (!hay) return fuente
+        return fuente
+            // La marcha y la distancia van por la unión de los dos campos: lo que se ve
+            // es lo que hay más lo que se propone, y lo que se propone quitar sigue
+            // ahí —en rojo— hasta que alguien acepte.
+            .replace(
+                "float d = yk_map(p, u);",
+                "float d = min(yk_map(p, u), yk_fantasma(p, u));",
+            )
+            .replace(
+                "float d = yk_marcha(p, u);",
+                "float d = min(yk_marcha(p, u), yk_fantasma(p, u));",
+            )
+            // El color. Se lee un cuarto de milímetro **por dentro** de la superficie y
+            // no en el punto de impacto: ahí los dos campos valen casi cero y el signo no
+            // distingue nada. Por dentro sí: material que se queda está dentro de los
+            // dos, material que se añade solo del fantasma, material que se quita solo
+            // del documento.
+            .replace(
+                "float3 base = float3(0.82f, 0.80f, 0.76f);",
+                """float3 base = float3(0.82f, 0.80f, 0.76f);
+                bool ykCambio = false;
+                {
+                    float3 dentro = p - n * 0.25f;
+                    float dDoc = yk_map(dentro, u);
+                    float dProp = yk_fantasma(dentro, u);
+                    if (dProp < 0.0f && dDoc >= 0.0f) { base = float3(0.22f, 0.74f, 0.38f); ykCambio = true; }
+                    else if (dDoc < 0.0f && dProp >= 0.0f) { base = float3(0.88f, 0.26f, 0.20f); ykCambio = true; }
+                }""",
+            )
+            // Y en la cara de corte manda el fantasma, no el tinte de grosor de pared.
+            //
+            // Esto no es un detalle: cuatro caras exteriores no enseñan lo que se quita
+            // por dentro —la boca de un taladro de 5 mm son cincuenta píxeles, medidos—,
+            // así que la sección **es** la forma de ver un vaciado propuesto. Con el
+            // tinte de pared por encima, cortar por el agujero enseñaría lo bien o mal
+            // que está la pared de una pieza que todavía no existe.
+            .replace(
+                "if (escena.plano.w > 0.0f && abs(dot(n, escena.planoN.xyz)) > 0.995f) {",
+                "if (!ykCambio && escena.plano.w > 0.0f && abs(dot(n, escena.planoN.xyz)) > 0.995f) {",
+            )
     }
 
     /**
@@ -204,6 +333,10 @@ class MslGenerator {
                 "float yk_marcha(float3 p, constant float *u)",
                 "float yk_marcha(float3 p, constant float *u, $tipo yk_campos)",
             )
+            .replace(
+                "float yk_fantasma(float3 p, constant float *u)",
+                "float yk_fantasma(float3 p, constant float *u, $tipo yk_campos)",
+            )
             // 2. Firmas de las funciones auxiliares del raymarcher.
             .replace(
                 "constant float *u, constant YkEscena &escena",
@@ -222,7 +355,7 @@ class MslGenerator {
             //    de enterarse, pero solo porque el arnés de paridad lo intentó: en la
             //    aplicación el error habría acabado en el registro y la pantalla se
             //    habría quedado con el shader anterior.
-            .replace(Regex("""(yk_map|yk_marcha)\(([^;\n]*?), u\)""")) {
+            .replace(Regex("""(yk_map|yk_marcha|yk_fantasma)\(([^;\n]*?), u\)""")) {
                 "${it.groupValues[1]}(${it.groupValues[2]}, u, yk_campos)"
             }
             .replace(", u, escena)", ", u, yk_campos, escena)")
@@ -350,6 +483,12 @@ class MslGenerator {
                 )
             }
 
+            is Cordon -> {
+                // Sin escalar de cabecera: los vértices empiezan en la propia base, en
+                // cuartetos (x, y, z, radio), que es justo lo que emite `escalares`.
+                sb.append("${sangria}float $d = yk_cordon($punto, u, $b, ${nodo.puntos.size});\n")
+            }
+
             is Revolucion -> {
                 val v = e.nuevaVariable("rv")
                 sb.append("${sangria}float2 ${v}q = float2(length($punto.xz) - ${u(0)}, $punto.y);\n")
@@ -474,29 +613,17 @@ class MslGenerator {
                         sb.append("$sangria    $d = $a;\n")
                         sb.append("${sangria}} else {\n")
                         val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo, cursorYaReservado = true)
-                        val expresion = when (nodo.modo) {
-                            ModoDeAcuerdo.UNION -> "yk_smin($a, $c, ${v}k)"
-                            ModoDeAcuerdo.DIFERENCIA -> "yk_smax($a, -$c, ${v}k)"
-                            ModoDeAcuerdo.INTERSECCION -> "yk_smax($a, $c, ${v}k)"
-                        }
+                        val expresion = mezclaLocal(nodo, a, c, "${v}k")
                         sb.append("$sangria    $d = $expresion;\n")
                         sb.append("${sangria}}\n")
                     } else {
                         val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo, cursorYaReservado = true)
-                        val expresion = when (nodo.modo) {
-                            ModoDeAcuerdo.UNION -> "yk_smin($a, $c, ${v}k)"
-                            ModoDeAcuerdo.DIFERENCIA -> "yk_smax($a, -$c, ${v}k)"
-                            ModoDeAcuerdo.INTERSECCION -> "yk_smax($a, $c, ${v}k)"
-                        }
+                        val expresion = mezclaLocal(nodo, a, c, "${v}k")
                         sb.append("${sangria}float $d = $expresion;\n")
                     }
                 } else {
                     val c = emitir(nodo.b, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
-                    val expresion = when (nodo.modo) {
-                        ModoDeAcuerdo.UNION -> "yk_smin($a, $c, ${v}k)"
-                        ModoDeAcuerdo.DIFERENCIA -> "yk_smax($a, -$c, ${v}k)"
-                        ModoDeAcuerdo.INTERSECCION -> "yk_smax($a, $c, ${v}k)"
-                    }
+                    val expresion = mezclaLocal(nodo, a, c, "${v}k")
                     sb.append("${sangria}float $d = $expresion;\n")
                 }
             }
@@ -517,6 +644,95 @@ class MslGenerator {
             is Vaciado -> {
                 val hijo = emitir(nodo.hijo, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
                 sb.append("${sangria}float $d = abs($hijo) - ${u(0)} * 0.5f;\n")
+            }
+
+            is Desfase -> {
+                val hijo = emitir(nodo.hijo, punto, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
+                sb.append("${sangria}float $d = $hijo - ${u(0)};\n")
+            }
+
+            is AlisadoLocal -> {
+                // El único nodo que evalúa a su hijo más de una vez, y por eso el único
+                // que se emite con un bucle en vez de desenrollado: cinco copias del
+                // subárbol entero multiplicarían por cinco el tamaño del shader y el
+                // tiempo de compilación de una escultura de doscientas partes. El tope
+                // del bucle es constante, que es la regla que no se negocia.
+                val v = e.nuevaVariable("al")
+                sb.append("${sangria}float ${v}w = 0.0f;\n")
+                for (i in nodo.sitios.indices) {
+                    val s = 1 + 5 * i
+                    sb.append(
+                        "$sangria${v}w = max(${v}w, ${u(s + 4)} * yk_caida(length($punto - " +
+                            "float3(${u(s)}, ${u(s + 1)}, ${u(s + 2)})), ${u(s + 3)}));\n",
+                    )
+                }
+                emitirMascara(nodo.mascara, 1 + 5 * nodo.sitios.size, v, punto, sb, ::u)
+                if (nodo.mascara.isNotEmpty()) {
+                    sb.append("$sangria${v}w = ${v}w * (1.0f - ${v}m);\n")
+                }
+                sb.append("${sangria}float ${v}c = 0.0f;\n")
+                sb.append("${sangria}float ${v}s = 0.0f;\n")
+                // La primera entrada es el punto sin desplazar, así que `punto + 0 * paso`
+                // devuelve el punto exacto y el campo sin alisar sale bit a bit igual.
+                sb.append(
+                    "${sangria}const float3 ${v}e[5] = {float3(0.0f), " +
+                        estrellaMsl() + "};\n",
+                )
+                sb.append("${sangria}for (int ${v}i = 0; ${v}i < 5; ++${v}i) {\n")
+                sb.append("$sangria    if (${v}i > 0 && ${v}w <= 0.0f) { break; }\n")
+                val q = e.nuevaVariable("aq")
+                sb.append("$sangria    float3 $q = $punto + ${v}e[${v}i] * ${u(0)};\n")
+                val hijo = emitir(nodo.hijo, q, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
+                sb.append("$sangria    if (${v}i == 0) { ${v}c = $hijo; } else { ${v}s += $hijo; }\n")
+                sb.append("${sangria}}\n")
+                sb.append(
+                    "${sangria}float $d = (${v}w <= 0.0f) ? ${v}c : " +
+                        "${v}c + ${v}w * (${v}s * 0.25f - ${v}c);\n",
+                )
+            }
+
+            is PellizcoLocal -> {
+                val v = e.nuevaVariable("pz")
+                sb.append("${sangria}float3 ${v}t = float3(0.0f);\n")
+                for (i in nodo.sitios.indices) {
+                    val s = 8 * i
+                    val radial = e.nuevaVariable("pr")
+                    val eje = "float3(${u(s + 5)}, ${u(s + 6)}, ${u(s + 7)})"
+                    sb.append(
+                        "$sangria" + "float3 $radial = $punto - float3(${u(s)}, ${u(s + 1)}, ${u(s + 2)});\n",
+                    )
+                    // Solo la parte perpendicular al eje: apretar también a lo largo de él
+                    // engordaría la zona en vez de afilarla.
+                    sb.append(
+                        "$sangria" + "float3 ${radial}t = $radial - $eje * dot($radial, $eje);\n",
+                    )
+                    sb.append(
+                        "$sangria${v}t += ${radial}t * (${u(s + 4)} * " +
+                            "yk_caida(length($radial), ${u(s + 3)}));\n",
+                    )
+                }
+                emitirMascara(nodo.mascara, 8 * nodo.sitios.size, v, punto, sb, ::u)
+                val factor = if (nodo.mascara.isEmpty()) "" else " * (1.0f - ${v}m)"
+                sb.append("${sangria}float3 ${v}q = $punto + ${v}t$factor;\n")
+                val hijo = emitir(nodo.hijo, "${v}q", sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
+                sb.append("${sangria}float $d = $hijo;\n")
+            }
+
+            is MoverLocal -> {
+                val v = e.nuevaVariable("mv")
+                sb.append("${sangria}float3 ${v}t = float3(0.0f);\n")
+                for (i in nodo.sitios.indices) {
+                    val s = 7 * i
+                    sb.append(
+                        "$sangria${v}t += float3(${u(s + 4)}, ${u(s + 5)}, ${u(s + 6)}) * " +
+                            "yk_caida(length($punto - float3(${u(s)}, ${u(s + 1)}, ${u(s + 2)})), ${u(s + 3)});\n",
+                    )
+                }
+                emitirMascara(nodo.mascara, 7 * nodo.sitios.size, v, punto, sb, ::u)
+                val factor = if (nodo.mascara.isEmpty()) "" else " * (1.0f - ${v}m)"
+                sb.append("${sangria}float3 ${v}q = $punto - ${v}t$factor;\n")
+                val hijo = emitir(nodo.hijo, "${v}q", sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
+                sb.append("${sangria}float $d = $hijo;\n")
             }
 
             is Simetria -> {
@@ -568,6 +784,33 @@ class MslGenerator {
                 }
                 e.cursorUniforms = cursorTrasElHijo
             }
+
+            is RepeticionCircular -> {
+                sb.append("${sangria}float $d = 1e30f;\n")
+                val cursorAntesDelHijo = e.cursorUniforms
+                var cursorTrasElHijo = cursorAntesDelHijo
+                for (i in 0 until nodo.cuenta) {
+                    e.cursorUniforms = cursorAntesDelHijo
+                    val factor = when {
+                        nodo.cuenta == 1 -> 0f
+                        kotlin.math.abs(nodo.angulo) >= 359.999f -> i.toFloat() / nodo.cuenta
+                        else -> i.toFloat() / (nodo.cuenta - 1)
+                    }
+                    val q = e.nuevaVariable("rc")
+                    val a = e.nuevaVariable("ra")
+                    sb.append("${sangria}float $a = ${lit(factor)} * ${u(0)} * 0.017453292519943295f;\n")
+                    val expr = when (nodo.eje) {
+                        Axis.X -> "float3($punto.x, cos($a) * $punto.y + sin($a) * $punto.z, -sin($a) * $punto.y + cos($a) * $punto.z)"
+                        Axis.Y -> "float3(cos($a) * $punto.x + sin($a) * $punto.z, $punto.y, -sin($a) * $punto.x + cos($a) * $punto.z)"
+                        Axis.Z -> "float3(cos($a) * $punto.x + sin($a) * $punto.y, -sin($a) * $punto.x + cos($a) * $punto.y, $punto.z)"
+                    }
+                    sb.append("${sangria}float3 $q = $expr;\n")
+                    val hijo = emitir(nodo.hijo, q, sb, e, podar, indiceDeCaja, baseDeCajas, indiceDeCampo)
+                    sb.append("${sangria}$d = min($d, $hijo);\n")
+                    cursorTrasElHijo = e.cursorUniforms
+                }
+                e.cursorUniforms = cursorTrasElHijo
+            }
         }
         return d
     }
@@ -580,6 +823,25 @@ class MslGenerator {
      * desalinee— y el resultado es un `float` que se compara contra el valor ya
      * calculado de la otra rama.
      */
+    /**
+     * La mezcla de un acuerdo local, en MSL.
+     *
+     * Está aquí y no repetida tres veces —una por cada camino de poda— porque ya lo
+     * estaba, y añadir el chaflán habría hecho seis. La correspondencia con
+     * `AcuerdoLocal.evaluar` es lo que comprueba el arnés de paridad, y una expresión
+     * copiada tres veces es una que se arregla dos.
+     */
+    private fun mezclaLocal(nodo: AcuerdoLocal, a: String, c: String, k: String): String {
+        val redondo = nodo.perfil == PerfilDeAcuerdo.REDONDEO
+        val menor = if (redondo) "yk_smin" else "yk_cmin"
+        val mayor = if (redondo) "yk_smax" else "yk_cmax"
+        return when (nodo.modo) {
+            ModoDeAcuerdo.UNION -> "$menor($a, $c, $k)"
+            ModoDeAcuerdo.DIFERENCIA -> "$mayor($a, -$c, $k)"
+            ModoDeAcuerdo.INTERSECCION -> "$mayor($a, $c, $k)"
+        }
+    }
+
     private fun podaDeCaja(
         nodo: SdfNode,
         punto: String,
@@ -610,10 +872,45 @@ class MslGenerator {
      * su gradiente puede pasar de 1 y avanzar de más se saltaría la superficie justo en
      * el filete, que es donde más se mira.
      */
-    private fun pasoSeguroDe(raiz: SdfNode): Float {
-        val peor = raiz.preorden().filterIsInstance<AcuerdoLocal>().maxOfOrNull { it.lipschitz } ?: 1f
-        return 1f / peor
+    private fun pasoSeguroDe(raiz: SdfNode): Float = raiz.pasoSeguro()
+
+    /**
+     * El peso de la máscara, común a las tres brochas.
+     *
+     * Se emite en una variable aparte y **solo cuando hay zonas protegidas**: sin máscara
+     * la fuente sale exactamente igual que antes de que esto existiera, y eso convierte
+     * «no he tocado lo que ya funcionaba» en algo que comprueba el arnés de paridad en vez
+     * de una promesa.
+     */
+    private fun emitirMascara(
+        mascara: List<*>,
+        base: Int,
+        v: String,
+        punto: String,
+        sb: StringBuilder,
+        u: (Int) -> String,
+    ) {
+        if (mascara.isEmpty()) return
+        sb.append("    float ${v}m = 0.0f;\n")
+        for (i in mascara.indices) {
+            val s = base + 5 * i
+            sb.append(
+                "    ${v}m = max(${v}m, ${u(s + 4)} * yk_caida(length($punto - " +
+                    "float3(${u(s)}, ${u(s + 1)}, ${u(s + 2)})), ${u(s + 3)}));\n",
+            )
+        }
     }
+
+    /**
+     * El estencil del alisado, en literales.
+     *
+     * Sale de la misma lista que usa `AlisadoLocal.evaluar`, así que los cuatro puntos
+     * que promedia la GPU son los cuatro que promedia la CPU. Escribirlos a mano en el
+     * shader sería el sitio perfecto para un signo cambiado que la paridad tardaría en
+     * cazar y que solo se vería como un alisado ligeramente torcido.
+     */
+    private fun estrellaMsl(): String =
+        ESTRELLA_TETRAEDRO.joinToString(", ") { "float3(${lit(it.x)}, ${lit(it.y)}, ${lit(it.z)})" }
 
     private fun huellaDe(nodo: SdfNode): String = buildString {
         fun visitar(n: SdfNode) {
@@ -633,14 +930,25 @@ class MslGenerator {
                     is AcuerdoLocal -> "a${n.modo.name.first()}"
                     is Transformado -> "x"
                     is Vaciado -> "v"
+                    is Desfase -> "o"
+                    // El número de sitios gobierna las líneas desenrolladas del peso y
+                    // del desplazamiento, así que añadir uno sí recompila; mover uno ya
+                    // puesto, o cambiarle la fuerza, no.
+                    is AlisadoLocal -> "z${n.sitios.size}:${n.mascara.size}"
+                    is PellizcoLocal -> "n${n.sitios.size}:${n.mascara.size}"
+                    is MoverLocal -> "w${n.sitios.size}:${n.mascara.size}"
                     is Simetria -> "s${n.eje.name}"
                     is Repeticion -> "r${n.cuenta}${n.eje.name}"
+                    is RepeticionCircular -> "rc${n.cuenta}${n.eje.name}"
                     is CampoDeMalla -> "M"
                     is Extrusion -> "X${n.perfil.poligono.size}"
                     // El número de tramos gobierna el bucle del shader, así que
                     // abrir o cerrar el camino sí es un cambio de topología.
                     is Barrido -> "B${n.perfil.poligono.size}:${n.tramos}"
                     is Revolucion -> "V${n.perfil.poligono.size}"
+                    // El número de vértices gobierna el bucle del cordón; moverlos o
+                    // cambiarles el grosor, no: eso solo reescribe uniforms.
+                    is Cordon -> "D${n.puntos.size}"
                 },
             )
             if (n.hijos.isNotEmpty()) {
@@ -672,6 +980,9 @@ class MslGenerator {
             // el bucle se recorre con una condición constante y una salida temprana,
             // así que sigue sin depender de ningún valor en tiempo de ejecución.
             constant int YK_MAX_VERTICES = 256;
+
+            // Tope de vértices de un cordón. Coincide con Cordon.MAXIMO_DE_PUNTOS.
+            constant int YK_MAX_CORDON = 64;
 
             // Distancia con signo a un polígono cerrado cuyos vértices vienen en el
             // buffer de uniforms a partir de `base`, en pares (x, y).
@@ -726,6 +1037,46 @@ class MslGenerator {
                 return sqrt(mejor) - radio;
             }
 
+            // Distancia exacta al casco convexo de dos bolas. Es la traducción literal
+            // de `conoRedondeado` en Sdf.kt; la paridad comprueba que siguen diciendo lo
+            // mismo. `sign` vale cero en el cero en los dos lados, y de ese cero dependen
+            // las dos tapas.
+            inline float yk_cono_redondeado(float3 p, float3 a, float3 b, float ra, float rb) {
+                float3 ba = b - a;
+                float l2 = dot(ba, ba);
+                float rr = ra - rb;
+                float a2 = l2 - rr * rr;
+                if (l2 <= 1e-12f || a2 <= 1e-9f) {
+                    return min(length(p - a) - ra, length(p - b) - rb);
+                }
+                float il2 = 1.0f / l2;
+                float3 pa = p - a;
+                float y = dot(pa, ba);
+                float z = y - l2;
+                float3 xp = pa * l2 - ba * y;
+                float x2 = dot(xp, xp);
+                float y2 = y * y * l2;
+                float z2 = z * z * l2;
+                float k = sign(rr) * rr * rr * x2;
+                if (sign(z) * a2 * z2 > k) return sqrt(x2 + z2) * il2 - rb;
+                if (sign(y) * a2 * y2 < k) return sqrt(x2 + y2) * il2 - ra;
+                return (sqrt(x2 * a2 * il2) + y * rr) * il2 - ra;
+            }
+
+            // Cordón: mínimo de conos redondeados a lo largo de una polilínea 3D. Los
+            // vértices vienen en el buffer desde `base`, en cuartetos (x, y, z, radio).
+            inline float yk_cordon(float3 p, constant float *u, int base, int n) {
+                float mejor = 1e20f;
+                for (int i = 0; i < YK_MAX_CORDON; ++i) {
+                    if (i + 1 >= n) break;
+                    int j = base + i * 4;
+                    float3 a = float3(u[j], u[j + 1], u[j + 2]);
+                    float3 b = float3(u[j + 4], u[j + 5], u[j + 6]);
+                    mejor = min(mejor, yk_cono_redondeado(p, a, b, u[j + 3], u[j + 7]));
+                }
+                return mejor;
+            }
+
             struct YkCamara {
                 float4 origen;      // xyz
                 float4 frente;      // xyz
@@ -746,6 +1097,17 @@ class MslGenerator {
                 if (k <= 0.0f) return min(a, b);
                 float h = clamp(0.5f + 0.5f * (b - a) / k, 0.0f, 1.0f);
                 return mix(b, a, h) - k * h * (1.0f - h);
+            }
+
+            inline float yk_cmin(float a, float b, float k) {
+                if (k <= 0.0f) return min(a, b);
+                float exacto = min(a, b);
+                float cruzado = (a + b - k) * 0.70710678f;
+                return max(min(exacto, cruzado), exacto - k * 0.70710678f);
+            }
+
+            inline float yk_cmax(float a, float b, float k) {
+                return -yk_cmin(-a, -b, k);
             }
 
             inline float yk_smax(float a, float b, float k) {

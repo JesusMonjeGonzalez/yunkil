@@ -86,6 +86,23 @@ data class PerfilFabricacion(
     fun editado(cambio: PerfilFabricacion.() -> PerfilFabricacion): PerfilFabricacion =
         cambio().copy(origen = OrigenDelPerfil.EDITADO)
 
+    /**
+     * El mismo perfil con la holgura que ha medido un cupón impreso en esta máquina.
+     *
+     * Toca **una sola cosa**, porque el cupón mide una sola cosa: qué agujero se traga el
+     * pasador. Arrastrar con ella la boquilla o el voladizo sería afirmar cosas que nadie
+     * ha comprobado bajo una etiqueta que dice «calibrado en tu máquina», y esa etiqueta
+     * solo vale mientras se pueda creer.
+     *
+     * Ver [CuponDeCalibracion].
+     */
+    fun calibradoCon(holguraMedida: Float): PerfilFabricacion {
+        require(holguraMedida.isFinite() && holguraMedida > 0f) {
+            "La holgura medida tiene que ser un número positivo, y llegó $holguraMedida"
+        }
+        return copy(holguraEncaje = holguraMedida, origen = OrigenDelPerfil.CALIBRADO)
+    }
+
     companion object {
 
         /**

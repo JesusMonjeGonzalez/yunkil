@@ -26,6 +26,10 @@ struct Caso {
     let campos: [CampoDelCaso]
     let puntos: [SIMD4<Float>]
     let esperado: [Float]
+    /// Lo que vale el árbol del fantasma en esos mismos puntos, cuando el caso lleva
+    /// una previsualización. Los dos árboles comparten el buffer de uniforms, así que
+    /// esta columna es la única forma de saber que el segundo lee sus propios huecos.
+    let esperadoFantasma: [Float]?
 }
 
 func fallar(_ mensaje: String) -> Never {
@@ -75,6 +79,11 @@ func leerCaso(directorio: URL) throws -> Caso {
         campos.append(CampoDelCaso(nx: d[0], ny: d[1], nz: d[2], muestras: muestras))
     }
 
+    guard let cabeceraF = lineas.next(), cabeceraF.hasPrefix("fantasma ") else {
+        fallar("\(directorio.lastPathComponent): falta la cabecera de fantasma")
+    }
+    let hayFantasma = cabeceraF.dropFirst("fantasma ".count) == "1"
+
     guard let cabeceraP = lineas.next(), cabeceraP.hasPrefix("puntos ") else {
         fallar("\(directorio.lastPathComponent): falta la cabecera de puntos")
     }
@@ -82,6 +91,7 @@ func leerCaso(directorio: URL) throws -> Caso {
 
     var puntos: [SIMD4<Float>] = []
     var esperado: [Float] = []
+    var esperadoFantasma: [Float] = []
     puntos.reserveCapacity(numeroPuntos)
     esperado.reserveCapacity(numeroPuntos)
 
@@ -90,6 +100,12 @@ func leerCaso(directorio: URL) throws -> Caso {
         let c = fila.split(separator: " ").map { Float($0)! }
         puntos.append(SIMD4<Float>(c[0], c[1], c[2], 0))
         esperado.append(c[3])
+        if hayFantasma {
+            guard c.count >= 5 else {
+                fallar("\(directorio.lastPathComponent): el caso declara fantasma y a los puntos les falta su columna")
+            }
+            esperadoFantasma.append(c[4])
+        }
     }
 
     return Caso(
@@ -98,13 +114,14 @@ func leerCaso(directorio: URL) throws -> Caso {
         uniforms: uniforms,
         campos: campos,
         puntos: puntos,
-        esperado: esperado
+        esperado: esperado,
+        esperadoFantasma: hayFantasma ? esperadoFantasma : nil
     )
 }
 
 /// Núcleo de cómputo que llama al `yk_map` generado. Se añade al vuelo para no
 /// contaminar el shader que consume la aplicación real.
-func nucleoDeComprobacion(campos: Int) -> String {
+func nucleoDeComprobacion(campos: Int, fantasma: Bool) -> String {
     // Con campos, el `yk_map` generado lleva el array de texturas en la firma, así que
     // el núcleo tiene que declararlo y pasárselo. Sin campos se emite exactamente el
     // texto de siempre: los 24 casos que ya pasaban no cambian ni un carácter.
@@ -112,6 +129,23 @@ func nucleoDeComprobacion(campos: Int) -> String {
         ? ",\n                       array<texture3d<float>, \(campos)> yk_campos [[texture(0)]]"
         : ""
     let arg = campos > 0 ? ", yk_campos" : ""
+
+    // El fantasma lee del mismo buffer que el documento, desplazado por el tamaño
+    // entero de este. Que ese desplazamiento sea el correcto no se puede comprobar
+    // leyendo el código: se comprueba aquí, contra lo que evaluó Kotlin.
+    var nucleoFantasma = ""
+    if fantasma {
+        nucleoFantasma = """
+
+        kernel void yk_paridadFantasma(constant float *u        [[buffer(0)]],
+                                       device const float4 *pts [[buffer(1)]],
+                                       device float *salida     [[buffer(2)]],
+                                       uint id [[thread_position_in_grid]]\(param)) {
+            salida[id] = yk_fantasma(pts[id].xyz, u\(arg));
+        }
+        """
+    }
+
     return """
 
 kernel void yk_paridad(constant float *u          [[buffer(0)]],
@@ -130,6 +164,7 @@ kernel void yk_poda(constant float *u          [[buffer(0)]],
     // que el desvío de punto flotante sea el mismo en las dos llamadas.
     salida[id] = yk_marcha(pts[id].xyz, u\(arg));
 }
+\(nucleoFantasma)
 """
 }
 
@@ -168,7 +203,9 @@ for dir in directorios {
     let biblioteca: MTLLibrary
     do {
         biblioteca = try dispositivo.makeLibrary(
-            source: caso.fuente + nucleoDeComprobacion(campos: caso.campos.count),
+            source: caso.fuente + nucleoDeComprobacion(
+                campos: caso.campos.count, fantasma: caso.esperadoFantasma != nil
+            ),
             options: nil
         )
     } catch {
@@ -186,6 +223,13 @@ for dir in directorios {
     }
     let pipeline = try dispositivo.makeComputePipelineState(function: funcion)
     let pipelinePoda = try dispositivo.makeComputePipelineState(function: funcionPoda)
+    var pipelineFantasma: MTLComputePipelineState?
+    if caso.esperadoFantasma != nil {
+        guard let f = biblioteca.makeFunction(name: "yk_paridadFantasma") else {
+            fallar("\(caso.nombre): no se encontró yk_paridadFantasma")
+        }
+        pipelineFantasma = try dispositivo.makeComputePipelineState(function: f)
+    }
 
     let n = caso.puntos.count
     let bytesU = max(caso.uniforms.count, 1) * MemoryLayout<Float>.stride
@@ -198,6 +242,8 @@ for dir in directorios {
     let bufS = dispositivo.makeBuffer(
         length: n * MemoryLayout<Float>.stride, options: .storageModeShared)!
     let bufS2 = dispositivo.makeBuffer(
+        length: n * MemoryLayout<Float>.stride, options: .storageModeShared)!
+    let bufS3 = dispositivo.makeBuffer(
         length: n * MemoryLayout<Float>.stride, options: .storageModeShared)!
 
     // Las texturas del caso, con el mismo formato y el mismo filtro que usa la
@@ -260,18 +306,34 @@ for dir in directorios {
         fallos += 1
         continue
     }
+    if let pf = pipelineFantasma, let err = lanzar(pf, bufS3) {
+        print("✗ \(caso.nombre): la GPU falló en el fantasma — \(err)")
+        fallos += 1
+        continue
+    }
 
     let obtenido = UnsafeBufferPointer(
         start: bufS.contents().bindMemory(to: Float.self, capacity: n), count: n)
     let podado = UnsafeBufferPointer(
         start: bufS2.contents().bindMemory(to: Float.self, capacity: n), count: n)
 
+    let deFantasma = UnsafeBufferPointer(
+        start: bufS3.contents().bindMemory(to: Float.self, capacity: n), count: n)
+
     var peor: Float = 0
     var indicePeor = 0
     var desviados = 0
     var podasIncorrectas = 0
     var peorPoda: Float = 0
+    var fantasmasDesviados = 0
+    var peorFantasma: Float = 0
+    var indicePeorFantasma = 0
     for i in 0..<n {
+        if let esperadoF = caso.esperadoFantasma {
+            let diffF = abs(deFantasma[i] - esperadoF[i])
+            if diffF > peorFantasma { peorFantasma = diffF; indicePeorFantasma = i }
+            if diffF > tolerancia { fantasmasDesviados += 1 }
+        }
         let diff = abs(obtenido[i] - caso.esperado[i])
         if diff > peor { peor = diff; indicePeor = i }
         if diff > tolerancia { desviados += 1 }
@@ -289,11 +351,14 @@ for dir in directorios {
         if exceso > tolerancia { podasIncorrectas += 1 }
         if exceso > peorPoda { peorPoda = exceso }
     }
-    peorGlobal = max(peorGlobal, peor)
+    peorGlobal = max(peorGlobal, max(peor, peorFantasma))
 
     let nombre = caso.nombre.padding(toLength: 22, withPad: " ", startingAt: 0)
-    if desviados == 0 && podasIncorrectas == 0 {
-        print("✓ \(nombre) \(n) puntos · peor desvío \(String(format: "%.2e", peor))")
+    if desviados == 0 && podasIncorrectas == 0 && fantasmasDesviados == 0 {
+        let cola = caso.esperadoFantasma == nil
+            ? ""
+            : " · fantasma \(String(format: "%.2e", peorFantasma))"
+        print("✓ \(nombre) \(n) puntos · peor desvío \(String(format: "%.2e", peor))\(cola)")
     } else {
         fallos += 1
         let p = caso.puntos[indicePeor]
@@ -301,6 +366,13 @@ for dir in directorios {
         if podasIncorrectas > 0 {
             print("    \(podasIncorrectas) puntos donde la marcha no coincide con el campo, " +
                   "hasta \(String(format: "%.4e", peorPoda)) mm de diferencia")
+        }
+        if fantasmasDesviados > 0, let esperadoF = caso.esperadoFantasma {
+            let q = caso.puntos[indicePeorFantasma]
+            print("    \(fantasmasDesviados)/\(n) puntos donde el fantasma diverge, " +
+                  "hasta \(String(format: "%.4e", peorFantasma)) mm")
+            print("    en (\(q.x), \(q.y), \(q.z)): Kotlin \(esperadoF[indicePeorFantasma]) " +
+                  "vs Metal \(deFantasma[indicePeorFantasma])")
         }
         print("    en (\(p.x), \(p.y), \(p.z)): Kotlin \(caso.esperado[indicePeor]) vs Metal \(obtenido[indicePeor])")
     }

@@ -186,3 +186,31 @@ internal fun smoothMin(a: Float, b: Float, k: Float): Float {
 }
 
 internal fun smoothMax(a: Float, b: Float, k: Float): Float = -smoothMin(-a, -b, k)
+
+/** Media raíz de dos: la proyección de la diagonal del chaflán sobre cada cara. */
+internal const val RAIZ_MEDIA = 0.70710678f
+
+/**
+ * Mezcla de chaflán: corta plano donde [smoothMin] redondea.
+ *
+ * El término cruzado `(a + b − k)·√½` es el chaflán clásico, y **acotado a propósito**.
+ * Sin el tope tiene dos defectos que en un shader de demo no se notan y aquí sí:
+ *
+ *  - con `k = 0` no se apaga —para `a = b = −10` daría −14,1 en vez de −10—, y la caída
+ *    local del acuerdo existe justo para que fuera de su esfera la booleana sea exacta;
+ *  - hacia dentro del sólido el error crece sin techo, y ahí dentro es donde leen el
+ *    vaciado, el grosor de pared y el analizador.
+ *
+ * El tope de `√½·k` por debajo de la booleana resuelve las dos cosas **sin tocar la
+ * forma**: en la superficie las dos distancias son pequeñas y el tope no llega a actuar,
+ * así que el chaflán que se ve es el chaflán entero; lo único que se acota es el valor
+ * del campo dentro del material, donde ya nadie dibuja pero sí se mide.
+ */
+internal fun chaflanMin(a: Float, b: Float, k: Float): Float {
+    if (k <= 0f) return min(a, b)
+    val exacto = min(a, b)
+    val cruzado = (a + b - k) * RAIZ_MEDIA
+    return max(min(exacto, cruzado), exacto - k * RAIZ_MEDIA)
+}
+
+internal fun chaflanMax(a: Float, b: Float, k: Float): Float = -chaflanMin(-a, -b, k)

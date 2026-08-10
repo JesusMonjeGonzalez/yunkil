@@ -17,6 +17,8 @@ struct PropuestaPendiente {
     let registro: EstadoDeLaApp.Propuesta
     /// El plan que se aplicaría: el cosido si Yunkil supo unir las piezas, o el suyo.
     let plan: PlanDeModelado
+    /// Estado exacto sobre el que la IA razonó y Yunkil revisó la propuesta.
+    let versionDocumento: Int64
     let lineas: [LineaExplicada]
     let reemplaza: Bool
     let resumen: String
@@ -64,16 +66,16 @@ struct PanelDePropuesta: View {
                 Image(systemName: "sparkles")
                     .foregroundStyle(.tint)
                 Text(propuesta.reemplaza ? "Propuesta — sustituye el modelo" : "Propuesta")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Text("\(propuesta.aceptadas.count) de \(propuesta.lineas.count)")
                     .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Tinta.cota)
             }
             if !propuesta.resumen.isEmpty {
                 Text(propuesta.resumen)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Tinta.cota)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Decirlo, y no aplicarlo por detrás: el usuario está mirando una lista y
@@ -83,17 +85,34 @@ struct PanelDePropuesta: View {
                     "Yunkil añadió \(propuesta.cosidas) operación\(propuesta.cosidas == 1 ? "" : "es") para unir las piezas sueltas.",
                     systemImage: "link"
                 )
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .font(Tipo.cuerpo)
+                .foregroundStyle(Tinta.cota)
             }
+            // La leyenda del fantasma. Un color sin explicar es una adivinanza, y esta
+            // se lee justo en el momento de decidir.
+            HStack(spacing: 10) {
+                muestra(Color(red: 0.22, green: 0.74, blue: 0.38), "se añade")
+                muestra(Color(red: 0.88, green: 0.26, blue: 0.20), "se quita")
+                Text("· en el viewport")
+                    .font(Tipo.menor)
+                    .foregroundStyle(Tinta.apagado)
+            }
+            .padding(.top, 2)
             if !propuesta.avisos.isEmpty {
                 Text("Se interpretó: " + propuesta.avisos.prefix(3).joined(separator: ", "))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .font(Tipo.cuerpo)
+                    .foregroundStyle(Tinta.apagado)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    private func muestra(_ color: Color, _ texto: String) -> some View {
+        HStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 9, height: 9)
+            Text(texto).font(Tipo.menor).foregroundStyle(Tinta.cota)
+        }
     }
 
     // MARK: Operaciones
@@ -122,7 +141,7 @@ struct PanelDePropuesta: View {
                     .foregroundStyle(marcada ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
                     .font(.system(size: 13))
                 Text(linea.texto)
-                    .font(.system(size: 12))
+                    .font(.system(size: 13))
                     .foregroundStyle(marcada ? .primary : .secondary)
                     .strikethrough(!marcada, color: .secondary)
                     .multilineTextAlignment(.leading)
@@ -142,11 +161,11 @@ struct PanelDePropuesta: View {
         VStack(alignment: .leading, spacing: 3) {
             Label("La pieza propuesta tiene problemas sin resolver", systemImage: "exclamationmark.triangle")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Tinta.riesgo)
             ForEach(propuesta.reparos.prefix(3), id: \.self) { reparo in
                 Text("· " + reparo)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .font(Tipo.cuerpo)
+                    .foregroundStyle(Tinta.cota)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -163,8 +182,8 @@ struct PanelDePropuesta: View {
                 estado.marcarTodasLasOperaciones(!propuesta.todasMarcadas)
             }
             .buttonStyle(.plain)
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
+            .font(Tipo.cuerpo)
+            .foregroundStyle(Tinta.cota)
 
             Spacer()
 

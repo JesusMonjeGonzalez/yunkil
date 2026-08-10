@@ -185,7 +185,7 @@ class CodegenTest {
             assertTrue(
                 b.contains("YK_MAX_PASOS") || b.contains("YK_PASOS_AO") ||
                     b.contains("YK_MAX_VERTICES") || b.contains("YK_MAX_GROSOR") ||
-                    b.contains("i < 3"),
+                    b.contains("YK_MAX_CORDON") || b.contains("i < 3"),
                 "bucle sin tope constante: for ($b)",
             )
         }

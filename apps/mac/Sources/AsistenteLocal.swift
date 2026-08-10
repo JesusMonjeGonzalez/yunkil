@@ -21,7 +21,7 @@ enum AsistenteLocal {
             system: system,
             user: user,
             maxTokens: maxTokens,
-            imagen: imagen
+            imagenes: imagen.map { [$0] } ?? []
         )
     }
 }
@@ -29,12 +29,14 @@ enum AsistenteLocal {
 enum LocalAssistantError: LocalizedError {
     case invalidResponse
     case invalidPlan(String)
+    case documentChanged
     case server(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidResponse: "El modelo no devolvió un plan válido."
         case .invalidPlan(let reason): "El modelo devolvió un plan no aplicable: \(reason)"
+        case .documentChanged: "El documento cambió mientras se preparaba la propuesta. Vuelve a pedirla sobre el estado actual."
         case .server(let message): message
         }
     }

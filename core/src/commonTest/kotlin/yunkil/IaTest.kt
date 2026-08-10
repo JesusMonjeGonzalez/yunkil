@@ -4,11 +4,13 @@ import yunkil.doc.Documento
 import yunkil.doc.Editor
 import yunkil.ia.Crear
 import yunkil.ia.Interprete
+import yunkil.ia.EstadoDelPlan
 import yunkil.ia.Vocabulario
 import yunkil.ia.cotasEnMundoDe
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -61,9 +63,174 @@ class IaTest {
     }
 
     @Test
+    fun `rechaza magnitudes ilegibles en vez de convertirlas en cero`() {
+        val resultado = Interprete.interpretar(
+            """{"operaciones":[{"op":"acotar","objetivo":"modelo","medida":"grande"}]}""",
+        )
+
+        val rechazo = assertNotNull(resultado as? yunkil.ia.ResultadoDeInterpretacion.Rechazado)
+        assertTrue("operación 1" in rechazo.motivo)
+        assertTrue("medida" in rechazo.motivo)
+        assertTrue("grande" in rechazo.motivo)
+    }
+
+    @Test
+    fun `rechaza elementos de operaciones que no son objetos`() {
+        val resultado = Interprete.interpretar(
+            """{"operaciones":[{"op":"crear","tipo":"CAJA"},null]}""",
+        )
+
+        val rechazo = assertNotNull(resultado as? yunkil.ia.ResultadoDeInterpretacion.Rechazado)
+        assertTrue("operación 2" in rechazo.motivo)
+        assertTrue("objeto JSON" in rechazo.motivo)
+    }
+
+    @Test
+    fun `acepta una pregunta estructurada sin inventar geometria`() {
+        val resultado = Interprete.interpretar(
+            """
+            {"estado":"NECESITA_DATOS","resumen":"Falta escala",
+             "preguntas":["¿Cuál es el ancho total en mm?"],"operaciones":[]}
+            """.trimIndent(),
+        )
+
+        val aceptado = assertNotNull(resultado as? yunkil.ia.ResultadoDeInterpretacion.Aceptado)
+        assertEquals(EstadoDelPlan.NECESITA_DATOS, aceptado.plan.estado)
+        assertEquals(listOf("¿Cuál es el ancho total en mm?"), aceptado.plan.preguntas)
+        assertTrue(aceptado.plan.operaciones.isEmpty())
+    }
+
+    @Test
+    fun `una solicitud de datos no puede esconder operaciones`() {
+        val resultado = Interprete.interpretar(
+            """
+            {"estado":"NECESITA_DATOS","preguntas":["¿Qué ancho?"],
+             "operaciones":[{"op":"crear","tipo":"CAJA"}]}
+            """.trimIndent(),
+        )
+
+        val rechazo = assertNotNull(resultado as? yunkil.ia.ResultadoDeInterpretacion.Rechazado)
+        assertTrue("no puede incluir operaciones" in rechazo.motivo)
+    }
+
+    @Test
     fun `recorta el JSON aunque el nombre de una pieza tenga llaves`() {
         val texto = """ruido {"resumen":"pieza {rara}","operaciones":[]} más ruido"""
         assertEquals("""{"resumen":"pieza {rara}","operaciones":[]}""", Interprete.extraerJson(texto))
+    }
+
+    // ------------------------------------------------------------------ respuesta cortada
+
+    /**
+     * Cuando el modelo se desboca razonando y topa con el presupuesto de tokens, la
+     * respuesta se corta a mitad y las llaves nunca vuelven a cerrar. Tirar el plan
+     * entero desperdicia las operaciones que sí llegaron completas.
+     */
+    @Test
+    fun `rescata las operaciones completas de una respuesta cortada`() {
+        val respuesta = """
+            {"resumen":"Base con eje","operaciones":[
+              {"op":"crear","tipo":"CAJA","alias":"base","nombre":"Base",
+               "parametros":{"anchura":60,"altura":8,"profundidad":35}},
+              {"op":"crear","tipo":"CILINDRO","alias":"eje","nombre":"Eje",
+               "parametros":{"radio":5,"altu
+        """.trimIndent()
+
+        val aceptado = assertNotNull(
+            Interprete.interpretar(respuesta) as? yunkil.ia.ResultadoDeInterpretacion.Aceptado,
+            "una respuesta cortada con una operación completa dentro debería rescatarse",
+        )
+        val crear = assertNotNull(aceptado.plan.operaciones.single() as? Crear)
+        assertEquals("CAJA", crear.tipo)
+        assertEquals(60f, crear.parametros["anchura"])
+        assertTrue(
+            aceptado.avisos.any { "cortada" in it },
+            "el rescate tiene que quedar dicho en los avisos: ${aceptado.avisos}",
+        )
+    }
+
+    /**
+     * Un plan cortado es un plan parcial, y sustituir todo el trabajo previo por la
+     * mitad de una propuesta destruye más de lo que aporta. Mismo criterio que la
+     * aceptación parcial.
+     */
+    @Test
+    fun `una respuesta cortada nunca reemplaza el documento`() {
+        val respuesta = """
+            {"resumen":"Todo de nuevo","reemplazar":true,"operaciones":[
+              {"op":"crear","tipo":"CAJA","alias":"base","parametros":{"anchura":60}},
+              {"op":"crear","tipo":"CILI
+        """.trimIndent()
+
+        val aceptado = assertNotNull(
+            Interprete.interpretar(respuesta) as? yunkil.ia.ResultadoDeInterpretacion.Aceptado,
+        )
+        assertFalse(aceptado.plan.reemplazar)
+    }
+
+    /**
+     * El rescate corta **entre operaciones**, nunca dentro de una.
+     *
+     * Salió del banco: con la lista de puntos cortada a medias, quedarse con el trozo
+     * daba un `perfil` de dos puntos que encaja perfectamente en el esquema —`puntos`
+     * es una lista y una lista corta es una lista— y reventaba al aplicarse con «un
+     * contorno necesita al menos tres puntos». Rescatar basura con forma válida es
+     * peor que no rescatar: el modelo de fallo se muda del intérprete al aplicador,
+     * donde ya no hay nada que hacer.
+     */
+    @Test
+    fun `el rescate no se queda con media operacion`() {
+        val respuesta = """
+            {"resumen":"Escuadra","operaciones":[
+              {"op":"crear","tipo":"EXTRUSION","alias":"esc","nombre":"Escuadra",
+               "parametros":{"altura":6}},
+              {"op":"perfil","objetivo":"esc","forma":"LIBRE",
+               "puntos":[[0,0],[60,0],[60,15
+        """.trimIndent()
+
+        val aceptado = assertNotNull(
+            Interprete.interpretar(respuesta) as? yunkil.ia.ResultadoDeInterpretacion.Aceptado,
+        )
+        assertEquals(
+            1,
+            aceptado.plan.operaciones.size,
+            "el perfil venía a medias y tenía que caerse entero: ${aceptado.plan.operaciones}",
+        )
+        assertNotNull(aceptado.plan.operaciones.single() as? Crear)
+    }
+
+    @Test
+    fun `una respuesta cortada antes de la primera operacion se sigue rechazando`() {
+        val respuesta = """{"resumen":"Base con eje","operaciones":[{"op":"cre"""
+        assertNotNull(Interprete.interpretar(respuesta) as? yunkil.ia.ResultadoDeInterpretacion.Rechazado)
+    }
+
+    /**
+     * `chaflan` ya no es una mentira piadosa.
+     *
+     * Durante meses el intérprete lo mandaba a `filete` y quien pedía un corte plano
+     * recibía un redondeo; el aviso decía «"chaflan" interpretado como "filete"», que se
+     * lee como una corrección de ortografía y no como el cambio de geometría que era.
+     * Ahora es la misma operación con el perfil plano, y el kernel sabe hacerlo.
+     */
+    @Test
+    fun `pedir un chaflan produce un chaflan de verdad`() {
+        val respuesta = """{"operaciones":[{"op":"chaflan","objetivo":"base","radio":1}]}"""
+        val aceptado = assertNotNull(
+            Interprete.interpretar(respuesta) as? yunkil.ia.ResultadoDeInterpretacion.Aceptado,
+        )
+        val filete = assertNotNull(aceptado.plan.operaciones.single() as? yunkil.ia.Filete)
+        assertTrue(filete.chaflan, "se pidió chaflán y salió redondeo")
+    }
+
+    @Test
+    fun `pedir un filete sigue redondeando`() {
+        val respuesta = """{"operaciones":[{"op":"filete","objetivo":"base","radio":1}]}"""
+        val aceptado = assertNotNull(
+            Interprete.interpretar(respuesta) as? yunkil.ia.ResultadoDeInterpretacion.Aceptado,
+        )
+        val filete = assertNotNull(aceptado.plan.operaciones.single() as? yunkil.ia.Filete)
+        assertFalse(filete.chaflan, "un filete no puede salir achaflanado")
     }
 
     @Test

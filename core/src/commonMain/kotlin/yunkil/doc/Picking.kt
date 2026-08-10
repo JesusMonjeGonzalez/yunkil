@@ -2,6 +2,7 @@ package yunkil.doc
 
 import yunkil.kernel.Vec3
 import yunkil.kernel.normal
+import yunkil.kernel.pasoSeguro
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -52,6 +53,12 @@ fun Documento.impactar(origen: Vec3, direccion: Vec3): Impacto? {
     val epsilon = (radio * 1e-4f).coerceIn(1e-4f, 0.01f)
     val alcance = (cotas.center - origen).length() + radio * 2f
 
+    // El mismo freno que el shader, y por el mismo motivo. Con una brocha de alisado o
+    // de arrastre el campo ya no es una distancia verdadera: avanzarlo entero se salta
+    // la superficie. En pantalla eso sería un agujero; aquí sería peor —señalar sobre la
+    // zona esculpida devolvería el punto de detrás, y la brocha siguiente caería ahí—.
+    val freno = nodo.pasoSeguro()
+
     var t = 0f
     repeat(MAXIMO_DE_PASOS) {
         val p = origen + dir * t
@@ -61,7 +68,7 @@ fun Documento.impactar(origen: Vec3, direccion: Vec3): Impacto? {
             val pieza = atribuir(p) ?: return null
             return Impacto(pieza, p.x, p.y, p.z, n.x, n.y, n.z, t)
         }
-        t += max(d, epsilon)
+        t += max(d * freno, epsilon)
         if (t > alcance) return null
     }
     return null

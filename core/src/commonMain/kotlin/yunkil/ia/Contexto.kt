@@ -92,9 +92,15 @@ fun Documento.contextoParaModelo(limiteDePiezas: Int = 80): String {
             .joinToString(" ") { "${it.clave}=${mm(pieza.parametro(it.clave))}" }
         if (parametros.isNotEmpty()) salida.append(' ').append(parametros)
 
-        if (pieza.tipo == yunkil.doc.TipoPieza.REPETICION || pieza.tipo == yunkil.doc.TipoPieza.SIMETRIA) {
+        if (
+            pieza.tipo == yunkil.doc.TipoPieza.REPETICION ||
+            pieza.tipo == yunkil.doc.TipoPieza.REPETICION_CIRCULAR ||
+            pieza.tipo == yunkil.doc.TipoPieza.SIMETRIA
+        ) {
             salida.append(" eje=").append(pieza.eje.name)
-            if (pieza.tipo == yunkil.doc.TipoPieza.REPETICION) salida.append(" cuenta=").append(pieza.cuenta)
+            if (pieza.tipo == yunkil.doc.TipoPieza.REPETICION || pieza.tipo == yunkil.doc.TipoPieza.REPETICION_CIRCULAR) {
+                salida.append(" cuenta=").append(pieza.cuenta)
+            }
         }
         if (!pieza.visible) salida.append(" (oculta)")
 

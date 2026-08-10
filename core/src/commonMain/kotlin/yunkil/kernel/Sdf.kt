@@ -3,8 +3,11 @@ package yunkil.kernel
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.PI
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 enum class Axis { X, Y, Z }
@@ -138,6 +141,130 @@ data class Capsula(val radio: Float, val altura: Float) : SdfNode {
 
     override fun cotas() = Aabb.centered(Vec3(radio, altura * 0.5f + radio, radio))
     override val escalares get() = listOf(radio, altura)
+}
+
+/**
+ * Distancia exacta al casco convexo de dos bolas: un cono de extremos redondeados.
+ *
+ * Es la pieza de la que se hace un cordón. La superficie lateral no une los dos
+ * ecuadores —eso dejaría una arista viva en cada extremo— sino que es la tangente
+ * común a las dos esferas, y por eso una cadena de estos troncos se lee como un tubo
+ * continuo que engorda y adelgaza en vez de como una ristra de conos empalmados.
+ */
+internal fun conoRedondeado(p: Vec3, a: Vec3, b: Vec3, ra: Float, rb: Float): Float {
+    val bax = b.x - a.x; val bay = b.y - a.y; val baz = b.z - a.z
+    val l2 = bax * bax + bay * bay + baz * baz
+    val rr = ra - rb
+    val a2 = l2 - rr * rr
+
+    // `a2 <= 0` quiere decir que una bola se traga a la otra: no hay tangente común y
+    // la fórmula general dividiría por cero. La unión es entonces la bola grande, y el
+    // mínimo de las dos distancias la da exacta, dentro y fuera.
+    if (l2 <= 1e-12f || a2 <= 1e-9f) {
+        return min((p - a).length() - ra, (p - b).length() - rb)
+    }
+
+    val il2 = 1f / l2
+    val pax = p.x - a.x; val pay = p.y - a.y; val paz = p.z - a.z
+    val y = pax * bax + pay * bay + paz * baz
+    val z = y - l2
+
+    val xpx = pax * l2 - bax * y
+    val xpy = pay * l2 - bay * y
+    val xpz = paz * l2 - baz * y
+    val x2 = xpx * xpx + xpy * xpy + xpz * xpz
+    val y2 = y * y * l2
+    val z2 = z * z * l2
+
+    val k = signoDe(rr) * rr * rr * x2
+    return when {
+        // Más allá de la tapa de `b`: manda la bola de `b`.
+        signoDe(z) * a2 * z2 > k -> sqrt(x2 + z2) * il2 - rb
+        // Más acá de la tapa de `a`: manda la bola de `a`.
+        signoDe(y) * a2 * y2 < k -> sqrt(x2 + y2) * il2 - ra
+        // En medio: la tangente común a las dos esferas.
+        else -> (sqrt(x2 * a2 * il2) + y * rr) * il2 - ra
+    }
+}
+
+/** Signo con cero en el cero, como el `sign` de MSL: las tapas dependen de ello. */
+private fun signoDe(v: Float) = if (v > 0f) 1f else if (v < 0f) -1f else 0f
+
+/**
+ * Cordón: un tubo de radio variable que recorre una polilínea 3D.
+ *
+ * Es la primitiva que faltaba para una cola, una pata, un mechón o un cable. Hasta
+ * ahora esas piezas se aproximaban encadenando cápsulas orientadas a mano: cada codo
+ * era una parte más del contrato, el radio solo podía cambiar a saltos entre pieza y
+ * pieza, y una cola de seis tramos gastaba seis nodos con sus seis transformaciones.
+ * Aquí la curva entera es **un** nodo, el grosor interpola vértice a vértice y el
+ * afilado de la punta es un radio que llega a cero, no un cono pegado al final.
+ *
+ * El campo es el mínimo de un cono redondeado por tramo. Cada tramo es una distancia
+ * exacta, y el mínimo de distancias exactas es exacto fuera de la unión y conservador
+ * dentro, así que el cordón sigue siendo 1-Lipschitz y el trazador puede saltar a
+ * paso completo. Los codos empalman redondeados por construcción, sin coser nada.
+ *
+ * La curva se guarda ya muestreada. Suavizar es cosa de quien la construye —el motor
+ * orgánico interpola sus puntos de control con Catmull-Rom antes de llegar aquí—, de
+ * modo que el shader recorre un bucle de tope constante y el nodo no tiene que
+ * evaluar splines por cada punto del espacio ni por cada rayo.
+ */
+@Serializable
+@SerialName("cordon")
+data class Cordon(
+    val puntos: List<Vec3>,
+    val radios: List<Float>,
+) : SdfNode {
+
+    init {
+        require(puntos.size >= 2) { "un cordón necesita al menos dos puntos" }
+        require(puntos.size <= MAXIMO_DE_PUNTOS) {
+            "un cordón no admite más de $MAXIMO_DE_PUNTOS puntos"
+        }
+        require(radios.size == puntos.size) { "cada punto del cordón necesita su radio" }
+    }
+
+    /** Tramos que se recorren. Un cordón nunca se cierra sobre sí mismo. */
+    val tramos: Int get() = puntos.size - 1
+
+    override fun evaluar(p: Vec3): Float {
+        var mejor = Float.MAX_VALUE
+        for (i in 0 until tramos) {
+            val d = conoRedondeado(p, puntos[i], puntos[i + 1], radios[i], radios[i + 1])
+            if (d < mejor) mejor = d
+        }
+        return mejor
+    }
+
+    override fun cotas(): Aabb {
+        // Cada tramo cabe en la caja de sus dos bolas: el casco convexo de dos convexos
+        // no se sale de una caja que ya contiene a los dos.
+        var lo = Vec3.splat(Float.MAX_VALUE)
+        var hi = Vec3.splat(-Float.MAX_VALUE)
+        for (i in puntos.indices) {
+            val r = Vec3.splat(radios[i])
+            lo = minOf(lo, puntos[i] - r)
+            hi = maxOf(hi, puntos[i] + r)
+        }
+        return Aabb(lo, hi)
+    }
+
+    override val escalares: List<Float>
+        get() = buildList {
+            for (i in puntos.indices) {
+                add(puntos[i].x); add(puntos[i].y); add(puntos[i].z); add(radios[i])
+            }
+        }
+
+    companion object {
+        /**
+         * Tope de vértices de un cordón. Coincide con `YK_MAX_CORDON` en el prelude MSL:
+         * el bucle del shader se recorre con una condición constante y salida temprana,
+         * así que ningún bucle emitido depende de un valor en tiempo de ejecución.
+         */
+        const val MAXIMO_DE_PUNTOS = 64
+    }
 }
 
 /**
@@ -399,6 +526,10 @@ enum class ModoDeAcuerdo { UNION, DIFERENCIA, INTERSECCION }
  * largo de ella. Para una pieza impresa a 0,4 mm de boquilla no se aprecia; para una
  * superficie de producto sí, y para eso está Plasticity.
  */
+/** Qué forma tiene el acuerdo: redondo como un filete, o plano como un chaflán. */
+@Serializable
+enum class PerfilDeAcuerdo { REDONDEO, CHAFLAN }
+
 @Serializable
 @SerialName("acuerdoLocal")
 data class AcuerdoLocal(
@@ -408,16 +539,20 @@ data class AcuerdoLocal(
     val centro: Vec3,
     val radio: Float,
     val fusion: Float,
+    /** Por defecto redondeo: es lo que había antes de que existiera el chaflán, y los
+     * documentos ya guardados no traen este campo. */
+    val perfil: PerfilDeAcuerdo = PerfilDeAcuerdo.REDONDEO,
 ) : SdfNode {
 
     override fun evaluar(p: Vec3): Float {
         val da = a.evaluar(p)
         val db = b.evaluar(p)
         val k = fusion * caidaDeAcuerdo((p - centro).length(), radio)
+        val redondo = perfil == PerfilDeAcuerdo.REDONDEO
         return when (modo) {
-            ModoDeAcuerdo.UNION -> smoothMin(da, db, k)
-            ModoDeAcuerdo.DIFERENCIA -> smoothMax(da, -db, k)
-            ModoDeAcuerdo.INTERSECCION -> smoothMax(da, db, k)
+            ModoDeAcuerdo.UNION -> if (redondo) smoothMin(da, db, k) else chaflanMin(da, db, k)
+            ModoDeAcuerdo.DIFERENCIA -> if (redondo) smoothMax(da, -db, k) else chaflanMax(da, -db, k)
+            ModoDeAcuerdo.INTERSECCION -> if (redondo) smoothMax(da, db, k) else chaflanMax(da, db, k)
         }
     }
 
@@ -441,7 +576,16 @@ data class AcuerdoLocal(
      * la esfera que la limita.
      */
     val lipschitz: Float
-        get() = if (radio <= 0f) 1f else 1f + FACTOR_DE_GRADIENTE * (fusion / radio).coerceAtMost(1f)
+        get() {
+            if (radio <= 0f) return 1f
+            val porLaCaida = 1f + FACTOR_DE_GRADIENTE * (fusion / radio).coerceAtMost(1f)
+            // El chaflán suma lo suyo por otra vía: el término cruzado `(a+b)·√½` tiene
+            // gradiente √2 cuando las dos superficies son paralelas, y eso no depende de
+            // lo ancha que sea la mezcla. Se toma el mayor de los dos, que es la única
+            // cota que vale para las dos causas a la vez.
+            if (perfil == PerfilDeAcuerdo.REDONDEO) return porLaCaida
+            return CHAFLAN_BASE + CHAFLAN_POR_CAIDA * (fusion / radio).coerceAtMost(1f)
+        }
 
     companion object {
         /**
@@ -457,6 +601,30 @@ data class AcuerdoLocal(
          * `fusion = radio` y sale 1,383 frente al 1,385 que predice esta cuenta.
          */
         const val FACTOR_DE_GRADIENTE = 0.385f
+
+        /**
+         * Pendiente máxima de la caída `(1 − t²)²`, en unidades de `1/radio`.
+         *
+         * Estaba escondida dentro de [FACTOR_DE_GRADIENTE] —0,385 = 1,54 × 0,25, donde
+         * 0,25 es lo que un `smooth-min` se mueve por unidad de `k`—. El chaflán se mueve
+         * por unidad de `k` otra cantidad distinta, así que la pendiente tenía que salir
+         * a la luz para poder combinarla con la que toque.
+         */
+        const val PENDIENTE_DE_LA_CAIDA = 1.54f
+
+        /**
+         * Gradiente extra del chaflán, y **de dónde sale**, porque la primera cifra que
+         * escribí (√2 a secas) la tumbó la prueba: medía 1,94 contra 1,41 declarado.
+         *
+         * Son dos causas que se suman y no una. El término cruzado `(a + b − k)·√½` tiene
+         * gradiente `√½·|∇a + ∇b|`, que vale √2 cuando las dos superficies son paralelas
+         * —y eso no depende de lo ancha que sea la mezcla—. Y encima `k` cambia con la
+         * posición, lo que añade `√½·|∇k| = √½ · 1,54 · fusion/radio`.
+         *
+         * Con fusion/radio = 0,5 la cuenta da 1,959 y la medida numérica dio 1,939.
+         */
+        const val CHAFLAN_BASE = 1.41422f
+        const val CHAFLAN_POR_CAIDA = 1.089f
 
         /** El peor caso, con la mezcla tan ancha como su alcance. */
         const val LIPSCHITZ_MAXIMO = 1f + FACTOR_DE_GRADIENTE + 0.005f
@@ -516,6 +684,16 @@ data class Vaciado(val hijo: SdfNode, val grosor: Float) : SdfNode {
     override fun evaluar(p: Vec3) = abs(hijo.evaluar(p)) - grosor * 0.5f
     override fun cotas() = hijo.cotas().expanded(grosor * 0.5f)
     override val escalares get() = listOf(grosor)
+    override val hijos get() = listOf(hijo)
+}
+
+/** Dilata o erosiona un sólido sin perder su árbol paramétrico. */
+@Serializable
+@SerialName("desfase")
+data class Desfase(val hijo: SdfNode, val distancia: Float) : SdfNode {
+    override fun evaluar(p: Vec3) = hijo.evaluar(p) - distancia
+    override fun cotas() = if (distancia > 0f) hijo.cotas().expanded(distancia) else hijo.cotas()
+    override val escalares get() = listOf(distancia)
     override val hijos get() = listOf(hijo)
 }
 
@@ -596,6 +774,66 @@ data class Repeticion(
         /** Tope duro: la repetición se desenrolla en el shader y no puede crecer sin límite. */
         const val MAXIMO = 64
     }
+}
+
+/** Repetición angular alrededor de un eje, paramétrica y sin duplicar el hijo. */
+@Serializable
+@SerialName("repeticion_circular")
+data class RepeticionCircular(
+    val hijo: SdfNode,
+    val cuenta: Int,
+    val angulo: Float = 360f,
+    val eje: Axis = Axis.Y,
+) : SdfNode {
+    init {
+        require(cuenta in 1..Repeticion.MAXIMO) {
+            "La cuenta debe estar entre 1 y ${Repeticion.MAXIMO}, era $cuenta"
+        }
+        require(angulo.isFinite() && angulo != 0f && abs(angulo) <= 360f) {
+            "El ángulo debe estar entre -360 y 360 grados"
+        }
+    }
+
+    private fun grados(i: Int): Float = when {
+        cuenta == 1 -> 0f
+        abs(angulo) >= 359.999f -> i * angulo / cuenta
+        else -> i * angulo / (cuenta - 1)
+    }
+
+    private fun inversa(p: Vec3, grados: Float): Vec3 {
+        val r = grados * (PI.toFloat() / 180f)
+        val c = cos(r)
+        val s = sin(r)
+        return when (eje) {
+            Axis.X -> Vec3(p.x, c * p.y + s * p.z, -s * p.y + c * p.z)
+            Axis.Y -> Vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z)
+            Axis.Z -> Vec3(c * p.x + s * p.y, -s * p.x + c * p.y, p.z)
+        }
+    }
+
+    override fun evaluar(p: Vec3): Float {
+        var d = Float.MAX_VALUE
+        for (i in 0 until cuenta) d = min(d, hijo.evaluar(inversa(p, grados(i))))
+        return d
+    }
+
+    override fun cotas(): Aabb {
+        val base = hijo.cotas()
+        val axis = when (eje) {
+            Axis.X -> Vec3(1f, 0f, 0f)
+            Axis.Y -> Vec3(0f, 1f, 0f)
+            Axis.Z -> Vec3(0f, 0f, 1f)
+        }
+        fun rotada(i: Int) = base.transformed(
+            Transform(rotation = Quat.fromAxisAngle(axis, grados(i) * PI.toFloat() / 180f)),
+        )
+        var acc = rotada(0)
+        for (i in 1 until cuenta) acc = acc.union(rotada(i))
+        return acc
+    }
+
+    override val escalares get() = listOf(angulo)
+    override val hijos get() = listOf(hijo)
 }
 
 // ---------------------------------------------------------------- utilidades

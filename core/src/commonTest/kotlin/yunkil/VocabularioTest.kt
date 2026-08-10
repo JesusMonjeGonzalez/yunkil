@@ -1,6 +1,7 @@
 package yunkil
 
 import yunkil.doc.TipoPieza
+import yunkil.fabricacion.PerfilFabricacion
 import yunkil.ia.Vocabulario
 import kotlin.test.Test
 import kotlin.test.assertTrue
@@ -16,6 +17,16 @@ import kotlin.test.assertTrue
 class VocabularioTest {
 
     private val instrucciones = Vocabulario.instrucciones()
+
+    @Test
+    fun `las reglas geometricas usan el perfil elegido`() {
+        val petg = PerfilFabricacion.VERIFICADOS.first { it.material == "PETG" }
+        val texto = Vocabulario.instrucciones(petg)
+
+        assertTrue("45°" in texto, "el límite de voladizo PETG no llegó al modelo")
+        assertTrue("50°" !in texto, "se coló el límite del perfil predeterminado")
+        assertTrue("1.2 mm" in texto, "el grosor del perfil no llegó al modelo")
+    }
 
     @Test
     fun `toda operacion que enseña el prompt existe de verdad`() {
@@ -99,15 +110,16 @@ class VocabularioTest {
         // Una medida en blanco es lo mismo que no tener medida: si se colara como
         // texto vacío, el modelo leería «la medida real que te han dado es:» y nada.
         val enBlanco = editor.instruccionesParaModeloConImagen(null, "   ")
-        assertTrue("no pongas «acotar»" in enBlanco, "una medida en blanco debe tratarse como ausente")
+        assertTrue("NECESITA_DATOS" in enBlanco, "una medida en blanco debe tratarse como ausente")
     }
 
     @Test
-    fun `sin medida conocida el prompt de imagen prohibe acotar y pide la cota`() {
+    fun `sin medida conocida el prompt de imagen pide la cota sin modelar`() {
         val texto = Vocabulario.instruccionesDeImagen(null)
 
-        assertTrue("no pongas «acotar»" in texto, "debería prohibir acotar sin medida")
-        assertTrue("resumen" in texto, "debería pedir que se diga qué cota falta")
+        assertTrue("sin operaciones" in texto, "no debería inventar geometría sin escala")
+        assertTrue("NECESITA_DATOS" in texto, "debería usar una solicitud estructurada")
+        assertTrue("preguntas" in texto, "debería pedir una cota concreta")
         assertTrue("NO ESTIMES MILÍMETROS" in texto, "la regla de la escala es la que sostiene todo")
     }
 

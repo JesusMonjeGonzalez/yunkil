@@ -8,12 +8,14 @@ import yunkil.kernel.AcuerdoLocal
 import yunkil.kernel.Axis
 import yunkil.kernel.Barrido
 import yunkil.kernel.ModoDeAcuerdo
+import yunkil.kernel.PerfilDeAcuerdo
 import yunkil.kernel.CampoDeMalla
 import yunkil.kernel.Caja
 import yunkil.kernel.Capsula
 import yunkil.kernel.Cilindro
 import yunkil.kernel.Cono
 import yunkil.kernel.Diferencia
+import yunkil.kernel.Desfase
 import yunkil.kernel.Esfera
 import yunkil.kernel.Extrusion
 import yunkil.kernel.Perfil2D
@@ -21,6 +23,7 @@ import yunkil.kernel.Punto2
 import yunkil.kernel.Revolucion
 import yunkil.kernel.Interseccion
 import yunkil.kernel.Repeticion
+import yunkil.kernel.RepeticionCircular
 import yunkil.kernel.SdfNode
 import yunkil.kernel.Simetria
 import yunkil.kernel.Toro
@@ -28,6 +31,7 @@ import yunkil.kernel.Transform
 import yunkil.kernel.Transformado
 import yunkil.kernel.Union
 import yunkil.kernel.Vaciado
+import yunkil.organico.MotorOrganico
 import yunkil.kernel.Vec3
 
 /**
@@ -65,14 +69,17 @@ enum class TipoPieza(
      * acotarla y exportarla verificada, que es justo lo que justifica traerla.
      */
     MALLA("Malla importada", false, false),
+    ESCULTURA("Escultura orgánica", false, false),
 
     UNION("Unión", true, true),
     DIFERENCIA("Diferencia", true, true),
     INTERSECCION("Intersección", true, true),
 
     VACIADO("Vaciado", true, true),
+    DESFASE("Desfase", true, true),
     SIMETRIA("Simetría", true, true),
-    REPETICION("Repetición", true, true);
+    REPETICION("Repetición", true, true),
+    REPETICION_CIRCULAR("Repetición circular", true, true);
 
     /**
      * Parámetros editables, en el orden en que deben aparecer en el inspector.
@@ -123,7 +130,7 @@ enum class TipoPieza(
             )
             // Su forma viene del archivo, no de mandos. Acotarla se hace con `acotar`
             // o con la escala, igual que cualquier otra pieza.
-            MALLA -> emptyList()
+            MALLA, ESCULTURA -> emptyList()
             BARRIDO -> listOf(
                 p("radio", "Radio de la sección", 0.2f, 100f, 3f),
                 // Un tubo se dibuja abierto y un marco cerrado, y no hay forma de
@@ -139,13 +146,23 @@ enum class TipoPieza(
                 listOf(
                     p("fusion", "Acuerdo", 0f, 30f, 0f),
                     p("acuerdoRadio", "Alcance del filete", 0f, 200f, 0f),
+                    // 0 redondea y 1 achaflana. Va como parámetro numérico y no como
+                    // campo aparte porque el resto del acuerdo local ya viaja así —radio
+                    // y centro son parámetros— y meter un enum al lado obligaría a
+                    // tocar la persistencia, el inspector y el empaquetado de uniforms
+                    // por un booleano.
+                    p("acuerdoChaflan", "Chaflán en vez de filete", 0f, 1f, 0f),
                     DefinicionParametro("acuerdoX", "Filete X", -600f, 600f, 0f),
                     DefinicionParametro("acuerdoY", "Filete Y", -600f, 600f, 0f),
                     DefinicionParametro("acuerdoZ", "Filete Z", -600f, 600f, 0f),
                 )
             VACIADO -> listOf(p("grosor", "Grosor", 0.2f, 40f, 2.4f))
+            DESFASE -> listOf(DefinicionParametro("distancia", "Distancia", -20f, 20f, 1f))
             SIMETRIA -> emptyList()
             REPETICION -> listOf(p("paso", "Paso", 0.5f, 200f, 20f))
+            REPETICION_CIRCULAR -> listOf(
+                DefinicionParametro("angulo", "Ángulo total", -360f, 360f, 360f, "°", huecoEnCero = 1f),
+            )
         }
 
     private fun p(clave: String, etiqueta: String, minimo: Float, maximo: Float, defecto: Float) =
@@ -227,6 +244,16 @@ data class DefinicionParametro(
     val maximo: Float,
     val defecto: Float,
     val unidad: String = "mm",
+    /**
+     * Hueco prohibido alrededor del cero, si lo hay.
+     *
+     * Un rango que cruza el cero puede contener un valor que el nodo rechaza: el ángulo
+     * total de una repetición circular va de −360° a 360° y cero no significa nada. Sin
+     * esto, el deslizador podía pararse justo ahí. La alternativa —rechazar el valor—
+     * atasca el deslizador a mitad de arrastre, que es peor: el editor lo salta y sigue
+     * al otro lado, como salta un mando que no tiene posición central.
+     */
+    val huecoEnCero: Float = 0f,
 )
 
 /**
@@ -260,6 +287,16 @@ data class Pieza(
      */
     @Transient
     val campoDeMalla: CampoDeMalla? = null,
+    /** Anatomía y brochas orgánicas canónicas; compilan al mismo SDF que el resto. */
+    val contratoOrganico: String? = null,
+    /**
+     * La cota de esta pieza está gobernada por un encaje contra una medida del mundo.
+     *
+     * Mientras exista, su extensión en el eje declarado no es un número que alguien
+     * escribió: se deriva de la medida y del perfil de fabricación cada vez que
+     * cualquiera de los dos cambia. Ver [Encaje].
+     */
+    val encaje: Encaje? = null,
 ) {
     fun parametro(clave: String): Float =
         parametros[clave]
@@ -293,6 +330,25 @@ data class Pieza(
 
     companion object {
         private var contador = 0
+
+        /**
+         * Adelanta el contador por detrás de los identificadores que ya existen.
+         *
+         * El contador arranca en cero con la aplicación, así que sin esto abrir un
+         * proyecto hecho en otra sesión y añadir una caja producía `caja-1` **otra vez**,
+         * con una `caja-1` ya dentro del árbol. A partir de ahí `buscar` y `mapear`
+         * aciertan a la primera que encuentran: cambiar una cota movía la pieza
+         * equivocada, y borrar una borraba la otra. No daba error en ningún sitio.
+         *
+         * Se llama al abrir, desde la frontera de persistencia, que es el único momento
+         * en que entran identificadores que este proceso no ha generado.
+         */
+        fun reservarIdentificadores(ids: Iterable<String>) {
+            for (id in ids) {
+                val n = id.substringAfterLast('-', "").toIntOrNull() ?: continue
+                if (n > contador) contador = n
+            }
+        }
 
         fun nueva(tipo: TipoPieza, nombre: String? = null): Pieza {
             contador++
@@ -366,6 +422,7 @@ fun Pieza.compilar(): SdfNode? {
         // Un barrido necesita dos puntos, no tres: una recta con sección circular es
         // un tubo perfectamente legítimo, y `esValido` exige contorno cerrado.
         TipoPieza.MALLA -> campoDeMalla
+        TipoPieza.ESCULTURA -> contratoOrganico?.let(MotorOrganico::nodoDeContrato)
 
         TipoPieza.BARRIDO -> perfil().takeIf { it.poligono.size >= 2 }?.let {
             Barrido(it, parametro("radio"), cerrado = parametro("cerrado") >= 0.5f)
@@ -391,12 +448,22 @@ fun Pieza.compilar(): SdfNode? {
         TipoPieza.VACIADO -> combinar(hijos) { a, b -> Union(a, b, 0f) }
             ?.let { Vaciado(it, parametro("grosor")) }
 
+        TipoPieza.DESFASE -> combinar(hijos) { a, b -> Union(a, b, 0f) }
+            ?.let { Desfase(it, parametro("distancia")) }
+
         TipoPieza.SIMETRIA -> combinar(hijos) { a, b -> Union(a, b, 0f) }
             ?.let { Simetria(it, eje) }
 
         TipoPieza.REPETICION -> combinar(hijos) { a, b -> Union(a, b, 0f) }
             ?.let {
                 Repeticion(it, cuenta.coerceIn(1, Repeticion.MAXIMO), parametro("paso"), eje)
+            }
+
+        TipoPieza.REPETICION_CIRCULAR -> combinar(hijos) { a, b -> Union(a, b, 0f) }
+            ?.let {
+                RepeticionCircular(
+                    it, cuenta.coerceIn(1, Repeticion.MAXIMO), parametro("angulo"), eje,
+                )
             }
     }
 
@@ -431,6 +498,8 @@ private fun Pieza.booleana(modo: ModoDeAcuerdo, a: SdfNode, b: SdfNode): SdfNode
         // El límite del gradiente medido vale mientras la mezcla no sea más ancha que su
         // alcance. Se recorta aquí en vez de confiar en quien llame.
         fusion = fusion.coerceAtMost(radio),
+        perfil = if (parametro("acuerdoChaflan") >= 0.5f) PerfilDeAcuerdo.CHAFLAN
+        else PerfilDeAcuerdo.REDONDEO,
     )
 }
 
@@ -452,6 +521,7 @@ private inline fun combinar(hijos: List<Pieza>, unir: (SdfNode, SdfNode) -> SdfN
  */
 @Serializable
 data class Documento(
+    val versionEsquema: Int = VERSION_ESQUEMA_ACTUAL,
     val raiz: Pieza,
     val seleccionado: String? = null,
     /**
@@ -479,6 +549,13 @@ data class Documento(
      * poco y no puede desincronizarse con el árbol.
      */
     val conversacion: Conversacion = Conversacion(),
+    /**
+     * Las medidas del objeto real con el que las piezas tienen que encajar.
+     *
+     * Están en el documento y no en cada pieza porque son del proyecto, no de la
+     * pieza: el diámetro del tubo lo usan el tapón y la abrazadera. Ver [Medida].
+     */
+    val medidas: List<Medida> = emptyList(),
 ) {
     fun compilar(): SdfNode? = raiz.compilar()
 
@@ -494,6 +571,8 @@ data class Documento(
         }
     }
 }
+
+const val VERSION_ESQUEMA_ACTUAL = 1
 
 fun Pieza.buscar(id: String): Pieza? {
     if (this.id == id) return this

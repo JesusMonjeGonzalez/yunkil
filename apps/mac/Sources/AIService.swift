@@ -10,16 +10,32 @@ enum AIProviderChoice: String, CaseIterable, Identifiable, Sendable {
     var name: String { self == .local ? "Local privado" : "OpenCode Go" }
 }
 
-struct AIModelOption: Identifiable, Hashable {
+struct AIModelOption: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
     let api: String
+    let supportsImage: Bool?
+
+    init(id: String, name: String, api: String, supportsImage: Bool? = nil) {
+        self.id = id
+        self.name = name
+        self.api = api
+        self.supportsImage = supportsImage
+    }
 }
 
 struct AISelection: Sendable {
     let provider: AIProviderChoice
     let model: String
     let api: String
+    let supportsImage: Bool?
+
+    init(provider: AIProviderChoice, model: String, api: String, supportsImage: Bool? = nil) {
+        self.provider = provider
+        self.model = model
+        self.api = api
+        self.supportsImage = supportsImage
+    }
 }
 
 @MainActor
@@ -30,7 +46,9 @@ final class AISettings: ObservableObject {
     @Published var model: String {
         didSet { UserDefaults.standard.set(model, forKey: "ai.model.\(provider.rawValue)") }
     }
-    @Published private(set) var localModels = [AIModelOption(id: "qwen3.5-9b", name: "Qwen3.5 9B · rápido", api: "chat")]
+    @Published private(set) var localModels = [AIModelOption(
+        id: "qwen3.5-9b", name: "Qwen3.5 9B · rápido", api: "chat", supportsImage: false
+    )]
     @Published private(set) var status = ""
     @Published private(set) var refreshing = false
 
@@ -45,7 +63,10 @@ final class AISettings: ObservableObject {
     var models: [AIModelOption] { provider == .local ? localModels : Self.goModels }
     var selection: AISelection {
         let option = models.first(where: { $0.id == model }) ?? models[0]
-        return AISelection(provider: provider, model: option.id, api: option.api)
+        return AISelection(
+            provider: provider, model: option.id, api: option.api,
+            supportsImage: option.supportsImage
+        )
     }
 
     func refreshLocalModels() async {
@@ -59,7 +80,10 @@ final class AISettings: ObservableObject {
             let discovered = entries.compactMap { entry -> AIModelOption? in
                 guard let id = entry["id"] as? String,
                       !id.contains("embedding"), !id.contains("autocomplete") else { return nil }
-                return AIModelOption(id: id, name: entry["name"] as? String ?? id, api: "chat")
+                return AIModelOption(
+                    id: id, name: entry["name"] as? String ?? id, api: "chat",
+                    supportsImage: Self.capacidadVisual(en: entry)
+                )
             }
             if !discovered.isEmpty { localModels = discovered }
             if !localModels.contains(where: { $0.id == model }) { selectDefault() }
@@ -77,19 +101,63 @@ final class AISettings: ObservableObject {
         model = available.contains(where: { $0.id == saved }) ? saved : fallback
     }
 
-    /// Aviso cuando se va a mandar una imagen a un modelo que quizá no la ve.
-    ///
-    /// Es un aviso y no un candado a propósito: del endpoint local solo se conoce el
-    /// identificador, no si lleva proyector de visión cargado, y bloquear por una
-    /// lista escrita a mano envejecería mal en cuanto añadas un modelo. Del stack
-    /// instalado, el único con `mmproj` es el ternario Bonsai.
     var avisoDeImagen: String? {
-        guard provider == .local else { return nil }
-        let ve = Self.modelosLocalesConVision.contains { model.localizedCaseInsensitiveContains($0) }
-        return ve ? nil : "«\(model)» probablemente no ve imágenes. El único local con visión es bonsai-ternary-27b."
+        guard let option = models.first(where: { $0.id == model }) else { return nil }
+        if option.supportsImage == true { return nil }
+        if let visual = models.first(where: { $0.supportsImage == true }) {
+            return "Al crear se usará «\(visual.name)», que sí admite imágenes."
+        }
+        return option.supportsImage == false
+            ? "«\(option.name)» no admite imágenes. Añade o selecciona un modelo con visión."
+            : "La capacidad visual de «\(option.name)» se comprobará antes de enviar."
     }
 
-    private static let modelosLocalesConVision = ["bonsai", "-vl", "vision"]
+    func selectionForRequest(withImage: Bool) async throws -> AISelection {
+        guard withImage else { return selection }
+        if selection.supportsImage == true { return selection }
+        if let visual = models.first(where: { $0.supportsImage == true }) {
+            model = visual.id
+            status = "Usando \(visual.name) · admite imágenes"
+            return selection
+        }
+        guard provider == .local, selection.supportsImage == nil else {
+            throw AIServiceError.modelWithoutVision(selection.model)
+        }
+
+        var componentes = URLComponents(string: "http://127.0.0.1:9292/props")!
+        componentes.queryItems = [URLQueryItem(name: "model", value: selection.model)]
+        let (data, response) = try await URLSession.shared.data(from: componentes.url!)
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let admite = Self.capacidadVisual(en: root) else {
+            throw AIServiceError.modelWithoutVision(selection.model)
+        }
+        localModels = localModels.map {
+            $0.id == model
+                ? AIModelOption(id: $0.id, name: $0.name, api: $0.api, supportsImage: admite)
+                : $0
+        }
+        guard admite else { throw AIServiceError.modelWithoutVision(selection.model) }
+        return selection
+    }
+
+    private static func capacidadVisual(en entrada: [String: Any]) -> Bool? {
+        let contenedores = [entrada, entrada["metadata"], entrada["architecture"]]
+            .compactMap { $0 as? [String: Any] }
+        for datos in contenedores {
+            for clave in ["input_modalities", "capabilities"] {
+                if let valores = datos[clave] as? [String] {
+                    return valores.contains {
+                        $0.lowercased() == "image" || $0.lowercased() == "vision"
+                    }
+                }
+            }
+            if let vision = datos["vision"] as? Bool { return vision }
+            if let modalidades = datos["modalities"] as? [String: Any],
+               let vision = modalidades["vision"] as? Bool { return vision }
+        }
+        return nil
+    }
 
     private func refreshStatus() {
         if provider == .local {
@@ -101,25 +169,27 @@ final class AISettings: ObservableObject {
         }
     }
 
-    private static let localFallback = [AIModelOption(id: "qwen3.5-9b", name: "Qwen3.5 9B · rápido", api: "chat")]
+    private static let localFallback = [AIModelOption(
+        id: "qwen3.5-9b", name: "Qwen3.5 9B · rápido", api: "chat", supportsImage: false
+    )]
     private static let goModels = [
-        AIModelOption(id: "deepseek-v4-flash", name: "DeepSeek V4 Flash · rápido y económico", api: "chat"),
-        AIModelOption(id: "deepseek-v4-pro", name: "DeepSeek V4 Pro · equilibrado", api: "chat"),
-        AIModelOption(id: "glm-5.2", name: "GLM-5.2 · razonamiento", api: "chat"),
-        AIModelOption(id: "glm-5.1", name: "GLM-5.1", api: "chat"),
-        AIModelOption(id: "kimi-k3", name: "Kimi K3 · máxima capacidad", api: "chat"),
-        AIModelOption(id: "kimi-k2.7-code", name: "Kimi K2.7 Code", api: "chat"),
-        AIModelOption(id: "kimi-k2.6", name: "Kimi K2.6", api: "chat"),
-        AIModelOption(id: "mimo-v2.5", name: "MiMo V2.5 · muy económico", api: "chat"),
-        AIModelOption(id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro", api: "chat"),
-        AIModelOption(id: "hy3", name: "Hy3", api: "chat"),
-        AIModelOption(id: "grok-4.5", name: "Grok 4.5", api: "chat"),
-        AIModelOption(id: "minimax-m3", name: "MiniMax M3", api: "messages"),
-        AIModelOption(id: "minimax-m2.7", name: "MiniMax M2.7", api: "messages"),
-        AIModelOption(id: "qwen3.8-max", name: "Qwen3.8 Max", api: "messages"),
-        AIModelOption(id: "qwen3.7-max", name: "Qwen3.7 Max", api: "messages"),
-        AIModelOption(id: "qwen3.7-plus", name: "Qwen3.7 Plus", api: "messages"),
-        AIModelOption(id: "qwen3.6-plus", name: "Qwen3.6 Plus", api: "messages"),
+        AIModelOption(id: "deepseek-v4-flash", name: "DeepSeek V4 Flash · rápido y económico", api: "chat", supportsImage: true),
+        AIModelOption(id: "deepseek-v4-pro", name: "DeepSeek V4 Pro · equilibrado", api: "chat", supportsImage: true),
+        AIModelOption(id: "glm-5.2", name: "GLM-5.2 · razonamiento", api: "chat", supportsImage: true),
+        AIModelOption(id: "glm-5.1", name: "GLM-5.1", api: "chat", supportsImage: true),
+        AIModelOption(id: "kimi-k3", name: "Kimi K3 · máxima capacidad", api: "chat", supportsImage: true),
+        AIModelOption(id: "kimi-k2.7-code", name: "Kimi K2.7 Code", api: "chat", supportsImage: true),
+        AIModelOption(id: "kimi-k2.6", name: "Kimi K2.6", api: "chat", supportsImage: true),
+        AIModelOption(id: "mimo-v2.5", name: "MiMo V2.5 · muy económico", api: "chat", supportsImage: true),
+        AIModelOption(id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro", api: "chat", supportsImage: true),
+        AIModelOption(id: "hy3", name: "Hy3", api: "chat", supportsImage: true),
+        AIModelOption(id: "grok-4.5", name: "Grok 4.5", api: "chat", supportsImage: true),
+        AIModelOption(id: "minimax-m3", name: "MiniMax M3", api: "messages", supportsImage: true),
+        AIModelOption(id: "minimax-m2.7", name: "MiniMax M2.7", api: "messages", supportsImage: true),
+        AIModelOption(id: "qwen3.8-max", name: "Qwen3.8 Max", api: "messages", supportsImage: true),
+        AIModelOption(id: "qwen3.7-max", name: "Qwen3.7 Max", api: "messages", supportsImage: true),
+        AIModelOption(id: "qwen3.7-plus", name: "Qwen3.7 Plus", api: "messages", supportsImage: true),
+        AIModelOption(id: "qwen3.6-plus", name: "Qwen3.6 Plus", api: "messages", supportsImage: true),
     ]
 }
 
@@ -197,6 +267,16 @@ struct ImagenDeReferencia: Sendable {
         }
         return ImagenDeReferencia(datos: jpeg, tipoMime: "image/jpeg")
     }
+
+    /// Un PNG que ya viene del tamaño correcto, sin pasarlo por `NSImage`.
+    ///
+    /// Es el caso de las vistas que dibuja el núcleo: 640 × 640 en gris, generadas por
+    /// nosotros. Reducirlas no ahorraría nada y **recomprimir a JPEG haría daño**: lo
+    /// que el crítico tiene que distinguir son cantos y agujeros pequeños contra un
+    /// fondo oscuro, que es justo lo que el JPEG emborrona primero.
+    static func dePng(_ datos: Data) -> ImagenDeReferencia {
+        ImagenDeReferencia(datos: datos, tipoMime: "image/png")
+    }
 }
 
 enum AITransport {
@@ -205,7 +285,7 @@ enum AITransport {
         system: String,
         user: String,
         maxTokens: Int,
-        imagen: ImagenDeReferencia? = nil
+        imagenes: [ImagenDeReferencia] = []
     ) async throws -> String {
         let token: String?
         let base: String
@@ -230,19 +310,16 @@ enum AITransport {
         //
         // El texto va DESPUÉS de la imagen a propósito: la instrucción es lo último
         // que lee el modelo y es lo que tiene que pesar más al empezar a responder.
-        let contenidoOpenAi: Any = imagen.map { img in
-            [
-                ["type": "image_url", "image_url": ["url": img.uriDeDatos]],
-                ["type": "text", "text": user],
-            ] as [[String: Any]]
-        } ?? user
+        let contenidoOpenAi: Any = imagenes.isEmpty ? user :
+            imagenes.map { ["type": "image_url", "image_url": ["url": $0.uriDeDatos]] as [String: Any] }
+                + [["type": "text", "text": user]]
 
-        let contenidoMessages: Any = imagen.map { img in
-            [
-                ["type": "image", "source": ["type": "base64", "media_type": img.tipoMime, "data": img.base64]],
-                ["type": "text", "text": user],
-            ] as [[String: Any]]
-        } ?? user
+        let contenidoMessages: Any = imagenes.isEmpty ? user :
+            imagenes.map {
+                ["type": "image", "source": [
+                    "type": "base64", "media_type": $0.tipoMime, "data": $0.base64
+                ]] as [String: Any]
+            } + [["type": "text", "text": user]]
 
         let body: [String: Any] = isMessages
             ? ["model": selection.model, "system": system, "messages": [["role": "user", "content": contenidoMessages]], "max_tokens": maxTokens, "temperature": 0.1]
@@ -266,12 +343,13 @@ enum AITransport {
 }
 
 enum AIServiceError: LocalizedError {
-    case unavailable, missingOpenCodeCredential, invalidResponse, server(String)
+    case unavailable, missingOpenCodeCredential, invalidResponse, modelWithoutVision(String), server(String)
     var errorDescription: String? {
         switch self {
         case .unavailable: "El proveedor de IA no está disponible."
         case .missingOpenCodeCredential: "Conecta OpenCode Go desde OpenCode con /connect antes de usarlo aquí."
         case .invalidResponse: "El modelo respondió con un formato que no se puede aplicar con seguridad."
+        case .modelWithoutVision(let model): "«\(model)» no admite imágenes y no hay otro modelo visual disponible."
         case .server(let text): text
         }
     }

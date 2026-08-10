@@ -1,5 +1,7 @@
 package yunkil.ia
 
+import yunkil.doc.SentidoDeEncaje
+
 import yunkil.doc.FormaDePerfil
 import yunkil.doc.TipoPieza
 
@@ -136,6 +138,7 @@ object Explicacion {
         is Girar -> listOf(op.objetivo)
         is Escalar -> listOf(op.objetivo)
         is Acotar -> listOf(op.objetivo)
+        is Holgura -> listOf(op.objetivo)
         is Renombrar -> listOf(op.objetivo)
         is Eliminar -> listOf(op.objetivo)
         is Duplicar -> listOf(op.objetivo)
@@ -175,6 +178,8 @@ object Explicacion {
                     TipoPieza.VACIADO -> "Ahueca"
                     TipoPieza.SIMETRIA -> "Refleja"
                     TipoPieza.REPETICION -> "Repite"
+                    TipoPieza.REPETICION_CIRCULAR -> "Repite en círculo"
+                    TipoPieza.DESFASE -> "Desfasa"
                     else -> "Envuelve"
                 }
                 r.registrar(op.alias, comoSeLlama)
@@ -200,6 +205,16 @@ object Explicacion {
 
             is Acotar ->
                 "Ajusta ${r.visible(op.objetivo)} para que mida ${medida(op.medida)} mm en ${op.eje.name}"
+
+            // Se cuenta el encaje y no la cota final a propósito: la cota final la calcula
+            // el núcleo con la holgura del perfil, y escribirla aquí obligaría a
+            // duplicar esa cuenta en un sitio donde no se puede comprobar.
+            is Holgura -> when (op.encaje) {
+                SentidoDeEncaje.ENTRA ->
+                    "Ajusta ${r.visible(op.objetivo)} para que entre holgada en ${medida(op.medida)} mm"
+                SentidoDeEncaje.RECIBE ->
+                    "Ajusta ${r.visible(op.objetivo)} para que reciba holgada una pieza de ${medida(op.medida)} mm"
+            }
 
             is Renombrar -> {
                 val antes = r.visible(op.objetivo)
@@ -280,7 +295,10 @@ object Explicacion {
                 val canto = if (op.contra != null)
                     "el canto entre ${r.visible(op.objetivo)} y ${r.visible(op.contra)}"
                 else "todos los cantos de ${r.visible(op.objetivo)}"
-                "Redondea $canto con radio ${medida(op.radio)} mm"
+                // «Redondea» a un chaflán sería la misma mentira que el aviso viejo del
+                // intérprete, y aquí la lee el usuario justo antes de aceptar.
+                if (op.chaflan) "Achaflana $canto ${medida(op.radio)} mm"
+                else "Redondea $canto con radio ${medida(op.radio)} mm"
             }
 
             is Nervio -> {

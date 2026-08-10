@@ -230,7 +230,7 @@ private fun casos(): List<CasoDeHilo> = listOf(
 
 fun main(args: Array<String>) {
     val endpoint = normalizarUrl(args.getOrNull(0) ?: "http://127.0.0.1:9292/v1/chat/completions")
-    val modelo = args.getOrNull(1) ?: "qwen3.6-35b-a3b"
+    val modelo = args.getOrNull(1) ?: "qwen3.5-9b"
     val cliente = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
 
     println("Banco de hilo de Yunkil — ¿sirve de algo la memoria de la conversación?")

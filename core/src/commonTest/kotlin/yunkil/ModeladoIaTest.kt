@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
 /**
  * Que un modelo de lenguaje pueda modelar **bien**, y no solo modelar.
  *
- * La lección más cara del puente está anotada en PROXIMOS-PASOS y se repite aquí porque
+ * La lección más cara del puente se repite aquí porque
  * gobierna todo este archivo: *una operación nombrada en una lista no se usa; una
  * operación vista aplicada sí*. Por eso no basta con que `filete` y `apoyar` existan:
  * tienen que estar en el vocabulario, tener alias para lo que los modelos escriben de
@@ -216,12 +216,22 @@ class ModeladoIaTest {
 
     @Test
     fun `el prompt sigue cabiendo en el contexto de un modelo local`() {
-        // No es una prueba de estilo: con 16K de contexto y un modelo que razona antes de
-        // escribir, cada carácter del mensaje de sistema es uno que no puede gastar en
-        // pensar. Ya pasó una vez que el plan salía entero y correcto en el razonamiento y
-        // se cortaba antes de emitir el JSON.
+        // No es una prueba de estilo: cada carácter del mensaje de sistema es uno que el
+        // modelo no puede gastar en pensar, y ya pasó una vez que el plan salía entero y
+        // correcto en el razonamiento y se cortaba antes de emitir el JSON.
+        //
+        // El techo estaba en 14.000 por los 16K de contexto del modelo local, y **esa
+        // premisa caducó**: el 9B corre con `--ctx-size 65536` y el modelo de visión con
+        // 65K también. El límite llevaba semanas condicionando cada decisión de
+        // vocabulario —y dejando 62 caracteres libres— por una cifra que ya no era la de
+        // la máquina.
+        //
+        // Sube a 18.000 y no desaparece. El contexto ya no aprieta, pero el prefill se
+        // paga en cada petición y un mensaje de sistema que crece sin freno diluye lo
+        // que importa. Que siga habiendo un número obliga a que añadir algo signifique
+        // decidir si merece el sitio.
         val caracteres = Vocabulario.instrucciones().length
-        assertTrue(caracteres < 14_000, "el mensaje de sistema mide $caracteres caracteres, demasiado")
+        assertTrue(caracteres < 18_000, "el mensaje de sistema mide $caracteres caracteres, demasiado")
     }
 
     @Test

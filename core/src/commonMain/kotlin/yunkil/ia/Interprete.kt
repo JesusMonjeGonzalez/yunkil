@@ -39,46 +39,9 @@ object Interprete {
     }
 
     const val MAXIMO_DE_OPERACIONES = 60
+
+
     private const val MAGNITUD_MAXIMA = 100_000f
-
-    fun interpretar(respuesta: String): ResultadoDeInterpretacion {
-        val bruto = extraerJson(respuesta)
-            ?: return ResultadoDeInterpretacion.Rechazado(
-                "la respuesta no contiene ningún objeto JSON: " + recorte(respuesta),
-            )
-
-        val arbol = try {
-            json.parseToJsonElement(bruto)
-        } catch (e: Exception) {
-            return ResultadoDeInterpretacion.Rechazado("el JSON está incompleto o mal formado: ${e.message}")
-        }
-        if (arbol !is JsonObject) {
-            return ResultadoDeInterpretacion.Rechazado("se esperaba un objeto JSON con «operaciones»")
-        }
-
-        val avisos = ArrayList<String>()
-        val normalizado = normalizarPlan(arbol, avisos)
-
-        val plan = try {
-            json.decodeFromJsonElement(PlanDeModelado.serializer(), normalizado)
-        } catch (e: Exception) {
-            return ResultadoDeInterpretacion.Rechazado(diagnosticar(e.message ?: "estructura no reconocida"))
-        }
-
-        if (plan.operaciones.isEmpty()) {
-            return ResultadoDeInterpretacion.Rechazado("el plan no contiene ninguna operación")
-        }
-        if (plan.operaciones.size > MAXIMO_DE_OPERACIONES) {
-            return ResultadoDeInterpretacion.Rechazado(
-                "el plan tiene ${plan.operaciones.size} operaciones y el máximo es $MAXIMO_DE_OPERACIONES; " +
-                    "agrupa la geometría en menos piezas",
-            )
-        }
-        comprobarMagnitudes(plan)?.let { return ResultadoDeInterpretacion.Rechazado(it) }
-        comprobarAlias(plan)?.let { return ResultadoDeInterpretacion.Rechazado(it) }
-
-        return ResultadoDeInterpretacion.Aceptado(plan, avisos)
-    }
 
     /**
      * Un plan de **edición** sobre lo que ya existe —nada de `crear`— se limita a
@@ -92,12 +55,47 @@ object Interprete {
      */
     const val MAXIMO_DE_EDICION = 3
 
+    /**
+     * Lee la respuesta del modelo. Si las llaves cierran, se interpreta tal cual;
+     * si la respuesta viene **cortada** —el modelo se desbocó razonando y topó con
+     * el presupuesto de tokens—, se rescata el prefijo válido.
+     *
+     * El rescate se prueba, no se supone: cada corte candidato se interpreta entero
+     * y solo se acepta el que produce un plan de verdad, así que una operación a
+     * medio escribir se descarta sola por no encajar en el esquema. Rescatar es
+     * seguro porque el usuario ve la propuesta antes de aplicarla.
+     */
     fun interpretar(respuesta: String, edicion: Boolean = false): ResultadoDeInterpretacion {
-        val bruto = extraerJson(respuesta)
-            ?: return ResultadoDeInterpretacion.Rechazado(
-                "la respuesta no contiene ningún objeto JSON: " + recorte(respuesta),
-            )
+        val exacto = extraerJson(respuesta)
+        if (exacto != null) return interpretarObjeto(exacto, edicion, cortada = false)
 
+        var primerMotivo: String? = null
+        for (candidato in rescatesDeJson(respuesta)) {
+            when (val r = interpretarObjeto(candidato, edicion, cortada = true)) {
+                is ResultadoDeInterpretacion.Aceptado -> return r
+                is ResultadoDeInterpretacion.Rechazado -> primerMotivo = primerMotivo ?: r.motivo
+            }
+        }
+        // Un bucle se dice como bucle. Solo se mira aquí, cuando ya no hay plan que
+        // salvar: dentro de un JSON bueno puede haber repetición legítima —seis
+        // taladros iguales— y confundirla con un desbocamiento sería peor que callar.
+        Desbocamiento.detectar(respuesta)?.let {
+            return ResultadoDeInterpretacion.Rechazado(
+                "te has quedado repitiendo «$it» y la respuesta se ha agotado sin plan. " +
+                    "No razones por escrito: responde solo con el objeto JSON.",
+            )
+        }
+        return ResultadoDeInterpretacion.Rechazado(
+            primerMotivo?.let { "la respuesta viene cortada y lo que llegó tampoco vale: $it" }
+                ?: ("la respuesta no contiene ningún objeto JSON: " + recorte(respuesta)),
+        )
+    }
+
+    private fun interpretarObjeto(
+        bruto: String,
+        edicion: Boolean,
+        cortada: Boolean,
+    ): ResultadoDeInterpretacion {
         val arbol = try {
             json.parseToJsonElement(bruto)
         } catch (e: Exception) {
@@ -106,6 +104,7 @@ object Interprete {
         if (arbol !is JsonObject) {
             return ResultadoDeInterpretacion.Rechazado("se esperaba un objeto JSON con «operaciones»")
         }
+        validarEstructura(arbol)?.let { return ResultadoDeInterpretacion.Rechazado(it) }
 
         val avisos = ArrayList<String>()
         val normalizado = normalizarPlan(arbol, avisos)
@@ -116,6 +115,19 @@ object Interprete {
             return ResultadoDeInterpretacion.Rechazado(diagnosticar(e.message ?: "estructura no reconocida"))
         }
 
+        if (plan.estado == EstadoDelPlan.NECESITA_DATOS) {
+            if (plan.preguntas.none { it.isNotBlank() }) {
+                return ResultadoDeInterpretacion.Rechazado(
+                    "un resultado NECESITA_DATOS debe incluir al menos una pregunta concreta",
+                )
+            }
+            if (plan.operaciones.isNotEmpty()) {
+                return ResultadoDeInterpretacion.Rechazado(
+                    "un resultado NECESITA_DATOS no puede incluir operaciones geométricas",
+                )
+            }
+            return ResultadoDeInterpretacion.Aceptado(plan, avisos)
+        }
         if (plan.operaciones.isEmpty()) {
             return ResultadoDeInterpretacion.Rechazado("el plan no contiene ninguna operación")
         }
@@ -142,7 +154,17 @@ object Interprete {
         comprobarMagnitudes(plan)?.let { return ResultadoDeInterpretacion.Rechazado(it) }
         comprobarAlias(plan)?.let { return ResultadoDeInterpretacion.Rechazado(it) }
 
-        return ResultadoDeInterpretacion.Aceptado(plan, avisos)
+        if (!cortada) return ResultadoDeInterpretacion.Aceptado(plan, avisos)
+
+        // Un plan cortado es un plan parcial, y sustituir el trabajo previo por la
+        // mitad de una propuesta destruye más de lo que aporta. Mismo criterio que
+        // en la aceptación parcial.
+        avisos.add(
+            "la respuesta del modelo venía cortada; se han rescatado " +
+                "${plan.operaciones.size} operaciones completas" +
+                (if (plan.reemplazar) " y no se reemplaza lo que ya había" else ""),
+        )
+        return ResultadoDeInterpretacion.Aceptado(plan.copy(reemplazar = false), avisos)
     }
 
     // ------------------------------------------------------------------ límites
@@ -209,6 +231,7 @@ object Interprete {
         is Girar -> "girar ${op.objetivo}"
         is Escalar -> "escalar ${op.objetivo}"
         is Acotar -> "acotar ${op.objetivo} a ${op.medida} mm en ${op.eje}"
+        is Holgura -> "holgura de ${op.objetivo} para ${op.medida} mm (${op.encaje})"
         is Renombrar -> "renombrar ${op.objetivo}"
         is Eliminar -> "eliminar ${op.objetivo}"
         is Duplicar -> "duplicar ${op.objetivo}"
@@ -268,12 +291,125 @@ object Interprete {
         return null
     }
 
+    /**
+     * Los cortes de una respuesta que nunca cierra: cada punto donde acaba de
+     * terminar un valor completo, con las llaves y corchetes que siguen abiertos
+     * cerrados a mano.
+     *
+     * Solo se corta **entre operaciones**, nunca dentro de una: el corte tiene que
+     * dejar abiertos exactamente el objeto del plan y su lista, que es la única
+     * profundidad donde acaba de terminar una operación entera. Cortar en cualquier
+     * llave que cierre daba planes con media operación dentro, y ahí encajar en el
+     * esquema no salva nada —una lista de puntos cortada sigue siendo una lista, y el
+     * contorno de dos puntos revienta al aplicarse—. Rescatar basura con forma válida
+     * es peor que no rescatar: muda el fallo del intérprete al aplicador, donde ya no
+     * queda nada por hacer.
+     *
+     * Se devuelven **de más largo a más corto**, que es de más a menos operaciones
+     * rescatadas. Quién decide no es esta función: el que llama prueba los candidatos
+     * por orden y se queda con el primero que produce un plan válido.
+     */
+    internal fun rescatesDeJson(texto: String): List<String> {
+        val inicio = texto.indexOf('{')
+        if (inicio < 0) return emptyList()
+        val abiertos = ArrayList<Char>()
+        val cortes = ArrayList<String>()
+        var enCadena = false
+        var escapado = false
+        for (i in inicio until texto.length) {
+            val c = texto[i]
+            when {
+                escapado -> escapado = false
+                c == '\\' && enCadena -> escapado = true
+                c == '"' -> enCadena = !enCadena
+                enCadena -> {}
+                c == '{' -> abiertos.add('}')
+                c == '[' -> abiertos.add(']')
+                c == '}' || c == ']' -> {
+                    if (abiertos.isEmpty()) break
+                    abiertos.removeAt(abiertos.size - 1)
+                    // Con la pila vacía el objeto estaba equilibrado y no hay nada que
+                    // rescatar: de eso ya se encargó extraerJson.
+                    if (abiertos.isEmpty()) break
+                    // Y solo cuentan los cortes que dejan abiertos el objeto del plan y
+                    // su lista de operaciones: cualquier otra profundidad está dentro de
+                    // una operación a medio escribir.
+                    if (abiertos.size == 2 && abiertos[0] == '}' && abiertos[1] == ']') {
+                        cortes.add(texto.substring(inicio, i + 1) + "]}")
+                    }
+                }
+            }
+        }
+        return cortes.asReversed()
+    }
+
     private fun recorte(texto: String): String {
         val limpio = texto.trim()
         return if (limpio.isEmpty()) "respuesta vacía" else "«" + limpio.take(200) + "»"
     }
 
     // ------------------------------------------------------------------ normalización
+
+    /**
+     * La tolerancia corrige ortografía, no intención. Antes un valor como
+     * `"medida":"grande"` terminaba convertido en cero y podía producir una pieza
+     * válida pero distinta de la solicitada. La estructura semántica se comprueba
+     * antes de normalizar para poder citar la operación y el campo originales.
+     */
+    private fun validarEstructura(plan: JsonObject): String? {
+        val bruto = plan.entries.firstOrNull {
+            (CLAVES_DE_PLAN[it.key.lowercase()] ?: it.key) == "operaciones"
+        }?.value ?: return null
+        val operaciones = bruto as? JsonArray
+            ?: return "el campo «operaciones» debe ser una lista"
+
+        for ((indice, elemento) in operaciones.withIndex()) {
+            val op = elemento as? JsonObject
+                ?: return "la operación ${indice + 1} debe ser un objeto JSON"
+            val nombre = comoTexto(op["op"] ?: op["kind"] ?: JsonPrimitive("sin nombre"))
+
+            for ((claveOriginal, valor) in op) {
+                val clave = CLAVES_DE_OPERACION[claveOriginal.lowercase()]
+                    ?: CLAVES_COMPACTAS[compactar(claveOriginal.lowercase())]
+                    ?: claveOriginal
+                when (clave) {
+                    "parametros" -> {
+                        val parametros = valor as? JsonObject
+                            ?: return "la operación ${indice + 1} («$nombre») requiere «parametros» como objeto"
+                        for ((parametro, numero) in parametros) {
+                            if (comoNumero(numero) == null) {
+                                return "la operación ${indice + 1} («$nombre») tiene «$parametro» no numérico: ${comoTexto(numero)}"
+                            }
+                        }
+                    }
+                    in CAMPOS_NUMERICOS -> if (comoNumero(valor) == null) {
+                        return "la operación ${indice + 1} («$nombre») tiene «$claveOriginal» no numérico: ${comoTexto(valor)}"
+                    }
+                    "posicion", "giro", "desplazamiento", "punto" -> {
+                        val componentes = when (valor) {
+                            is JsonArray -> valor.toList()
+                            is JsonObject -> valor.values.toList()
+                            else -> return "la operación ${indice + 1} («$nombre») requiere «$claveOriginal» como lista numérica"
+                        }
+                        if (componentes.any { comoNumero(it) == null }) {
+                            return "la operación ${indice + 1} («$nombre») contiene un valor no numérico en «$claveOriginal»"
+                        }
+                    }
+                    "puntos" -> {
+                        val puntos = valor as? JsonArray
+                            ?: return "la operación ${indice + 1} («$nombre») requiere «puntos» como lista"
+                        if (puntos.any { punto ->
+                                punto !is JsonArray || punto.any { comoNumero(it) == null }
+                            }
+                        ) {
+                            return "la operación ${indice + 1} («$nombre») contiene un punto no numérico"
+                        }
+                    }
+                }
+            }
+        }
+        return null
+    }
 
     private fun normalizarPlan(objeto: JsonObject, avisos: MutableList<String>): JsonObject {
         val campos = LinkedHashMap<String, JsonElement>()
@@ -286,6 +422,8 @@ object Interprete {
                 }
                 "reemplazar" -> campos["reemplazar"] = JsonPrimitive(comoBooleano(valor))
                 "resumen" -> campos["resumen"] = JsonPrimitive(comoTexto(valor))
+                "estado" -> campos["estado"] = JsonPrimitive(comoTexto(valor).trim().uppercase())
+                "preguntas" -> campos["preguntas"] = valor
                 else -> campos[canonica] = valor
             }
         }
@@ -308,7 +446,19 @@ object Interprete {
                         val resuelta = OPERACIONES_SINONIMAS[bruto]
                             ?: OPERACIONES_COMPACTAS[compactar(bruto)]
                             ?: bruto
-                        if (resuelta != bruto) avisos.add("«$bruto» interpretado como «$resuelta»")
+                        // «chaflan» ya no es un sinónimo de «filete»: es un filete con el
+                        // perfil plano. Se pone el campo aquí y deja de hacer falta el
+                        // aviso que avisaba de que le íbamos a dar otra cosa.
+                        if (bruto in PIDEN_CHAFLAN) put("chaflan", JsonPrimitive(true))
+                        if (resuelta != bruto) {
+                            // Casi todas las sustituciones son de ortografía y el aviso
+                            // genérico basta. Unas pocas cambian la geometría, y ahí el
+                            // mismo aviso engaña: se lee como una normalización inocente.
+                            avisos.add(
+                                SUSTITUCIONES_QUE_CAMBIAN_LA_PIEZA[bruto]
+                                    ?: "«$bruto» interpretado como «$resuelta»",
+                            )
+                        }
                         put("op", JsonPrimitive(resuelta))
                     }
 
@@ -402,6 +552,11 @@ object Interprete {
         return limpio.toFloatOrNull()
     }
 
+    private val CAMPOS_NUMERICOS = setOf(
+        "valor", "escala", "factor", "holgura", "medida", "x", "y", "z",
+        "diametro", "unidades", "grosor", "radio", "tamano",
+    )
+
     // ------------------------------------------------------------------ tablas
 
     private val CLAVES_DE_PLAN = mapOf(
@@ -464,6 +619,18 @@ object Interprete {
         CLAVES_DE_OPERACION.entries.associate { (clave, valor) -> compactar(clave) to valor }
     }
 
+    /**
+     * Sinónimos que **no** lo son: cambian la pieza, no la ortografía.
+     *
+     * `fillet` → `filete` es una traducción. `chaflan` → `filete` es otra geometría: un
+     * chaflán corta plano y un filete redondea. Contarlo como una normalización más deja
+     * al usuario creyendo que pidió una cosa y le dieron esa cosa.
+     */
+    private val SUSTITUCIONES_QUE_CAMBIAN_LA_PIEZA = emptyMap<String, String>()
+
+    /** Las palabras con las que se pide un corte plano en vez de un redondeo. */
+    private val PIDEN_CHAFLAN = setOf("chaflan", "chaflán", "bevel", "achaflanar", "biselar")
+
     private val OPERACIONES_SINONIMAS = mapOf(
         "add" to "crear", "añadir" to "crear", "anadir" to "crear", "agregar" to "crear",
         "create" to "crear", "new" to "crear", "nueva" to "crear", "nuevo" to "crear",
@@ -492,6 +659,7 @@ object Interprete {
         "al_plato" to "asentar", "bajaralplato" to "asentar",
         "fillet" to "filete", "redondear" to "filete", "chaflan" to "filete",
         "chaflán" to "filete", "acuerdo" to "filete", "roundedge" to "filete",
+        "achaflanar" to "filete", "biselar" to "filete", "bevel" to "filete",
         "orient" to "apoyar", "orientar" to "apoyar", "layflat" to "apoyar",
         "lay_flat" to "apoyar", "tumbar" to "apoyar",
         "select" to "seleccionar",
@@ -520,9 +688,12 @@ object Interprete {
         "INTERSECCIÓN" to "INTERSECCION", "COMMON" to "INTERSECCION",
         "SHELL" to "VACIADO", "HOLLOW" to "VACIADO", "CASCARA" to "VACIADO",
         "CÁSCARA" to "VACIADO", "THICKEN" to "VACIADO",
+        "OFFSET" to "DESFASE", "DILATE" to "DESFASE", "ERODE" to "DESFASE",
         "MIRROR" to "SIMETRIA", "SIMETRÍA" to "SIMETRIA", "ESPEJO" to "SIMETRIA",
         "ARRAY" to "REPETICION", "PATTERN" to "REPETICION", "REPEAT" to "REPETICION",
         "REPETICIÓN" to "REPETICION", "PATRON" to "REPETICION",
+        "CIRCULAR_PATTERN" to "REPETICION_CIRCULAR", "RADIAL_PATTERN" to "REPETICION_CIRCULAR",
+        "PATRON_CIRCULAR" to "REPETICION_CIRCULAR", "PATRÓN_CIRCULAR" to "REPETICION_CIRCULAR",
         "EXTRUDE" to "EXTRUSION", "EXTRUIR" to "EXTRUSION", "EXTRUSIÓN" to "EXTRUSION",
         "REVOLVE" to "REVOLUCION", "LATHE" to "REVOLUCION", "REVOLUCIÓN" to "REVOLUCION",
         "TORNEADO" to "REVOLUCION",

@@ -5,7 +5,6 @@ import yunkil.doc.Editor
 import java.io.File
 import java.nio.file.Files
 import kotlin.test.AfterTest
-import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -76,8 +75,6 @@ class ImportarMallaTest {
         val malla = assertNotNull(editor.seleccionado)
         assertTrue(editor.taladrar(malla, designacion = "M4"), "no se pudo taladrar: ${editor.ultimoError}")
 
-        // 0,4 mm y no 0,5: a 0,5 esta misma pieza sale agujereada por un defecto que
-        // sigue abierto, documentado en `un STL importado sale agujereado a 0,5 mm`.
         val salida = File(temporal, "editada.stl").absolutePath
         val certificado = assertNotNull(
             editor.exportarStl(salida, 0.4f, null),
@@ -89,17 +86,7 @@ class ImportarMallaTest {
     }
 
     @Test
-    @Ignore("Defecto abierto: ver PROXIMOS-PASOS.md. La causa no está localizada.")
-    fun `un STL importado sale agujereado a 0,5 mm`() {
-        // Queda escrito como prueba y no como comentario para que no se pierda, y
-        // porque el día que se arregle esto tiene que ponerse verde solo.
-        //
-        // Lo medido: la misma pieza sale estanca a 0,6, 0,4 y 0,35 mm, y agujereada a
-        // 0,5. Que no sea monótono descarta que sea un problema de resolución
-        // insuficiente. No es la regla de bordes de la paridad —se arregló y este
-        // caso no se movió— ni el desvío de las columnas —se añadió y tampoco—.
-        // El exportador lo detecta y se niega a entregar el archivo, así que el fallo
-        // es «prueba con otra resolución», no un STL roto en las manos de nadie.
+    fun `un STL importado conserva topologia cuando la superficie coincide con la rejilla`() {
         val ruta = stlDeFuera()
         val editor = Editor(Documento.vacio())
         assertTrue(editor.importarMalla(ruta))

@@ -140,6 +140,7 @@ class ExplicacionTest {
             Girar(objetivo = "a", z = 90f),
             Escalar(objetivo = "a", factor = 2f),
             Acotar(objetivo = "a", medida = 80f),
+            Holgura(objetivo = "a", medida = 20f),
             Renombrar(objetivo = "a", nombre = "B"),
             Duplicar(objetivo = "a"),
             Colocar(objetivo = "a", referencia = "a"),

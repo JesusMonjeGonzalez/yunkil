@@ -10,6 +10,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import yunkil.doc.Documento
 import yunkil.doc.Editor
+import yunkil.ia.CriticoVisual
 import yunkil.ia.Vocabulario
 import java.net.URI
 import java.net.http.HttpClient
@@ -44,7 +45,19 @@ import kotlin.system.exitProcess
  */
 
 private const val ENDPOINT_POR_DEFECTO = "http://127.0.0.1:9292/v1/chat/completions"
-private const val MODELO_POR_DEFECTO = "qwen3.6-35b-a3b"
+/**
+ * El modelo del producto, y por tanto el que mide el banco por defecto.
+ *
+ * No es el que más acierta —el 35B saca 10/12 frente a 8/12— y aun así es este, por
+ * aritmética de memoria: el techo de la máquina son 24 GiB y el bucle visual necesita
+ * **dos modelos residentes**. 9B + VL-8B son 12,9 GiB y caben holgados; 35B + VL-8B son
+ * 27,4 y no caben. Medir por defecto contra un modelo que el producto no puede usar
+ * daba números que no describían a nadie.
+ */
+private const val MODELO_POR_DEFECTO = "qwen3.5-9b"
+
+/** El crítico visual por defecto. Es el único local con visión que cabe al lado del 9B. */
+private const val VISOR_POR_DEFECTO = "qwen3-vl-8b"
 
 /** Vueltas de corrección, las mismas que da el producto. */
 private const val RONDAS = 3
@@ -164,6 +177,43 @@ private fun casos(): List<Caso> = listOf(
     },
 )
 
+/**
+ * Dibuja la pieza y se la enseña al modelo con visión.
+ *
+ * Devuelve el reproche para la siguiente ronda, o `null` si la pieza pasa. Todo lo que
+ * salga mal —no hay geometría que dibujar, el visor no responde, el veredicto no se
+ * entiende— devuelve `null` y la pieza pasa: el crítico visual es un revisor **de más**,
+ * y un revisor de más que se cae no puede tumbar un plan que los revisores exactos ya
+ * dieron por bueno.
+ */
+private fun mirar(
+    cliente: HttpClient,
+    endpoint: String,
+    visor: String,
+    editor: Editor,
+    plan: yunkil.ia.PlanDeModelado,
+    peticion: String,
+): String? {
+    val png = editor.vistasDelPlan(plan)
+    if (png == null) {
+        println("   [visión] no hay geometría que dibujar")
+        return null
+    }
+    val respuesta = pedirAlModeloConImagen(
+        cliente, endpoint, visor, CriticoVisual.instrucciones(peticion), png,
+    )
+    // «El crítico aprobó» y «el crítico no contestó» son la misma línea en blanco si no
+    // se dicen. Es el mismo fallo de diagnóstico que ya tuvo este banco con la red, y
+    // aquí engañaría el doble: un visor caído se leería como doce piezas impecables.
+    if (respuesta == null) {
+        println("   [visión] SIN RESPUESTA — ${motivoDelUltimoFallo ?: "motivo desconocido"}")
+        return null
+    }
+    val veredicto = CriticoVisual.leer(respuesta)
+    if (veredicto.cumple) return null
+    return CriticoVisual.informeParaModelo(veredicto) + "\nCorrige y devuelve el plan completo."
+}
+
 fun main(args: Array<String>) {
     val endpoint = normalizarUrl(args.getOrNull(0) ?: ENDPOINT_POR_DEFECTO)
     val modelo = args.getOrNull(1) ?: MODELO_POR_DEFECTO
@@ -172,12 +222,18 @@ fun main(args: Array<String>) {
     // pasada sirven para diagnosticar un modo de fallo y no para comparar dos
     // modelos; para eso hace falta repetir cada caso y mirar la proporción.
     val repeticiones = (args.getOrNull(2)?.toIntOrNull() ?: 1).coerceAtLeast(1)
+    // El modelo de visión es opcional **a propósito**: correr el banco con y sin él es
+    // la columna de control del bucle visual, y con el interruptor en el argumento sale
+    // del mismo binario y de la misma tarde. Se aprendió por las malas que un banco
+    // comparativo sin columna de control no compara nada.
+    val visor = (args.getOrNull(3) ?: VISOR_POR_DEFECTO).takeIf { it.isNotBlank() && it != "-" }
 
     println("Banco de modelado de Yunkil")
     println("  modelo:   $modelo")
     println("  endpoint: $endpoint")
     println("  prompt:   ${Vocabulario.instrucciones().length} caracteres")
     if (repeticiones > 1) println("  vueltas:  $repeticiones por caso")
+    println("  visión:   ${visor ?: "sin crítico visual"}")
     println()
 
     val cliente = HttpClient.newBuilder()
@@ -191,6 +247,8 @@ fun main(args: Array<String>) {
     var correctos = 0
     var aLaPrimera = 0
     var cosidos = 0
+    var acotados = 0
+    var criticados = 0
     var rondasGastadas = 0
 
     val total = casos().size
@@ -218,20 +276,40 @@ fun main(args: Array<String>) {
                 if (respuesta == null) break
 
                 val leido = editor.interpretarPlan(respuesta)
-                plan = leido.plan
-                if (plan == null) {
+                val propuesto = leido.plan
+                if (propuesto == null) {
+                    plan = null
                     conversacion.add(respuesta to "El JSON no vale: ${leido.motivoDelRechazo}. Devuelve el plan completo corregido.")
                     continue
                 }
 
-                revision = editor.revisarPlan(plan, null)
-                if (revision.aceptable) break
+                // La post-condición de cotas, antes de mirar la geometría: una pieza
+                // del tamaño equivocado no tiene ningún defecto que el revisor pueda
+                // ver, así que si esto esperara a que hubiera reparos no correría nunca
+                // en el caso que la motiva.
+                val acotado = editor.acotarPlan(propuesto, caso.peticion, null)
+                if (acotado != null) acotados++
+                val aplicable = acotado ?: propuesto
+                plan = aplicable
+
+                revision = editor.revisarPlan(aplicable, null)
+                if (revision.aceptable) {
+                    // La mirada va **después** de los números y solo si pasan: dibujar la
+                    // pieza y preguntarle a un segundo modelo cuesta una carga y una
+                    // inferencia, y gastarlas en un plan que ya se sabe roto es tirarlas.
+                    val reparo = if (visor == null) null
+                    else mirar(cliente, endpoint, visor, editor, aplicable, caso.peticion)
+                    if (reparo == null) break
+                    criticados++
+                    conversacion.add(respuesta to reparo)
+                    continue
+                }
 
                 // Antes de gastar una ronda de inferencia: si el revisor sabe qué
                 // operación une lo que quedó suelto, se aplica y se vuelve a medir. Es
                 // el mismo arreglo que se le iba a pedir al modelo, sin el paso de que
                 // el modelo lo transcriba —que es donde se perdía—.
-                val cosido = editor.coserPlan(plan, null)
+                val cosido = editor.coserPlan(aplicable, null)
                 if (cosido != null) {
                     val despues = editor.revisarPlan(cosido, null)
                     if (despues.aceptable) {
@@ -316,6 +394,8 @@ fun main(args: Array<String>) {
     // acertara el contacto. Va aparte a propósito: mezclarlo con el resto tapa
     // justo el número que dice cuánto trabajo está haciendo el producto por el modelo.
     println("Cosidos por Yunkil  $cosidos/$intentos")
+    println("Acotados por Yunkil $acotados/$intentos")
+    if (visor != null) println("Criticados a la vista $criticados/$intentos")
     println("Rondas gastadas     $rondasGastadas (máximo posible ${intentos * RONDAS})")
 
     // El desglose por caso es lo que separa el ruido de un fallo de verdad: un caso

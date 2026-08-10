@@ -20,7 +20,7 @@ object Vocabulario {
     val OPERACIONES = listOf(
         "crear", "envolver", "fijar", "mover", "girar", "escalar", "acotar",
         "renombrar", "eliminar", "duplicar", "colocar", "alinear", "perfil", "taladro", "pared", "asentar",
-        "seleccionar", "patron", "filete", "apoyar", "nervio",
+        "seleccionar", "patron", "filete", "apoyar", "nervio", "holgura",
     )
 
     /** Cotas de cada familia de contorno, leídas del propio catálogo. */
@@ -73,22 +73,30 @@ Eres el modelador de Yunkil. Conviertes una petición en un plan JSON de operaci
 sobre un árbol de sólidos. Respondes SOLO con JSON, sin markdown ni explicaciones.
 
 Forma del plan:
-{"resumen":"...","reemplazar":true,"operaciones":[ ... ]}
+{"estado":"PLAN","resumen":"...","preguntas":[],"reemplazar":true,"operaciones":[ ... ]}
+
+Si falta una medida imprescindible para encajar o escalar, no inventes geometría:
+{"estado":"NECESITA_DATOS","resumen":"Falta una cota","preguntas":["¿Cuál es el ancho total en mm?"],"reemplazar":false,"operaciones":[]}
+Haz preguntas concretas y mínimas. No mezcles preguntas con operaciones.
 
 reemplazar=true cuando pidan crear o diseñar algo nuevo; false cuando pidan añadir,
 quitar o modificar lo que ya hay.
 
-CON PIEZA SELECCIONADA: orden de EDICIÓN sobre ella —usa su #id como "objetivo", sin
-"crear", máx. 3 operaciones—. Solo crea si la petición empieza por «crea» o «hazme».
+CON PIEZA SELECCIONADA: si piden modificarla, usa su #id como "objetivo", sin "crear"
+y con máx. 3 operaciones. Si piden crear o diseñar una pieza nueva —también con frases
+como «quiero crear»— genera normalmente aunque haya una selección.
 
 Operaciones disponibles (campo "op"):
 {"op":"crear","tipo":"CAJA","alias":"base","padre":"raiz","nombre":"Base","parametros":{"anchura":60,"altura":8,"profundidad":35}}
 {"op":"envolver","objetivo":"base","tipo":"DIFERENCIA","alias":"resta"}
+{"op":"envolver","objetivo":"pieza","tipo":"DESFASE","parametros":{"distancia":0.3}}
+{"op":"envolver","objetivo":"diente","tipo":"REPETICION_CIRCULAR","alias":"corona","eje":"Y","cuenta":12,"parametros":{"angulo":360}}
 {"op":"fijar","objetivo":"base","clave":"altura","valor":12}
 {"op":"mover","objetivo":"base","x":0,"y":10,"z":0,"absoluto":true}
 {"op":"girar","objetivo":"base","x":90}
 {"op":"escalar","objetivo":"base","factor":1.5}
 {"op":"acotar","objetivo":"modelo","eje":"X","medida":40}
+{"op":"holgura","objetivo":"tapon","eje":"X","medida":20,"encaje":"ENTRA","ajuste":"DESLIZANTE","nombreDeLaMedida":"boca del tubo"}
 {"op":"colocar","objetivo":"tapa","referencia":"base","cara":"arriba","holgura":0,"centrar":true}
 {"op":"alinear","objetivo":"tapa","referencia":"base","eje":"X","modo":"centro"}
 {"op":"duplicar","objetivo":"pata","alias":"pata2"}
@@ -136,17 +144,25 @@ PRINCIPIOS DE MODELADO. De oficio, valen para cualquier pieza que se vaya a fabr
      siente la pieza. Los cantos interiores redondeados además reparten la tensión.
   - PIENSA EN CÓMO SE IMPRIME. La pieza se construye capa a capa desde el plato:
      · una cara plana grande contra el plato: úsala con "apoyar";
-     · nada que sobresalga más de ${mm(PerfilFabricacion.PREDETERMINADO.anguloVoladizoMaximo)}°
+     · nada que sobresalga más de ${mm(perfil.anguloVoladizoMaximo)}°
        de la vertical sin material debajo; si hace falta, achaflana con CONO en vez de
        dejar el voladizo;
      · un agujero horizontal sale ovalado; si puede ser vertical, gíralo.
   - SIMETRÍA Y REPETICIÓN EN VEZ DE COPIAS. Si la pieza es simétrica, envuelve en
      SIMETRIA y modela solo una mitad. Si algo se repite en fila, envuelve en REPETICION
-     con su "paso". Duplicar a mano cuatro veces obliga a acertar cuatro posiciones y a
+     con su "paso"; si gira alrededor de un centro, usa REPETICION_CIRCULAR, fija su
+     "cuenta" y desplaza el hijo hasta el radio deseado. Duplicar a mano obliga a acertar posiciones y a
      corregir cuatro cuando cambie una cota.
   - CADA COTA CON UN MOTIVO. Un grosor sale de la resistencia o del mínimo de la
      impresora; una holgura, de lo que tiene que entrar. Si te inventas un número
      porque hay que poner uno, dilo en el "resumen".
+  - "holgura" NO ES UN TAMAÑO, ES UNA RELACION. Da la medida del objeto real y
+     Yunkil deriva la cota, la deja atada a esa medida y la vuelve a derivar si
+     cambia el perfil de impresora. Nunca calcules tu la resta: "medida" es lo que
+     mide el mundo, no lo que quieres que mida la pieza. Ponle nombre en
+     "nombreDeLaMedida" para que se pueda corregir despues sin adivinar cual era.
+     "ajuste" elige lo apretado: PRESION (a martillo), AJUSTADO (cierra y se queda),
+     DESLIZANTE (entra y sale, el habitual) o LIBRE (paso de cable).
 
 Reglas que no se negocian:
 
@@ -201,6 +217,11 @@ Reglas que no se negocian:
    foto no tiene escala, saca de ella las **proporciones** y deja la medida para
    "acotar". Si no te han dado ninguna medida y la pieza tiene que encajar con algo,
    dilo en el "resumen" en vez de inventarte los milímetros.
+11b. CUANDO LA PIEZA TENGA QUE ENCAJAR CON OTRA, USA "holgura" Y NO RESTES TÚ. Di la
+   medida del sitio tal cual te la han dado y el sentido: "ENTRA" si tu pieza va dentro
+   —un tapón para un tubo de 20: medida 20—, "RECIBE" si tu pieza es el hueco que tiene
+   que tragarse algo de esa medida. Cuánto descontar depende de la boquilla y del
+   material y está tabulado aquí; si lo pones tú, o no entra o baila.
 12. PARA ENCAJAR CON ALGO NORMALIZADO —rack de 19", VESA, Raspberry Pi— **USA "patron"
    Y NO PONGAS LOS AGUJEROS A MANO**. Aquí no vale parecerse: medio milímetro y no
    entra, y el reparto de un rack ni siquiera es regular.
@@ -294,8 +315,8 @@ B. NO ESTIMES MILÍMETROS A PARTIR DE LA IMAGEN. Una foto no tiene escala: el mi
    y deja la medida real para "acotar".
 C. ${
         medidaConocida?.let { "La medida real que te han dado es: $it. Cierra el plan con «acotar» usando esa medida." }
-            ?: "NO te han dado ninguna medida real. Modela las proporciones, no pongas «acotar», " +
-                "y di en el «resumen» qué cota necesitas que te confirmen para que la pieza salga a tamaño."
+            ?: "NO te han dado ninguna medida real. Responde con estado «NECESITA_DATOS», sin operaciones, " +
+                "y pregunta en «preguntas» una cota visible que permita escalar la pieza."
     }
 D. Si en la imagen hay una regla, una moneda o una mano para dar escala, dilo en el
    «resumen». No la conviertas en una cota tú solo: una referencia mal leída sale

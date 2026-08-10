@@ -116,8 +116,20 @@ class Aplicador(
                 id == null -> "la operación se creó pero no se pudo identificar"
                 else -> {
                     op.alias?.let { alias[it] = id }
+                    val fallos = ArrayList<String>()
                     aplicarAtributos(id, op.nombre, op.parametros, null, null, null)
-                        ?.let { anotaciones.add("${op.tipo}: $it") }
+                        ?.let(fallos::add)
+                    op.eje?.let {
+                        editor.fijarEje(id, it.name)
+                        editor.ultimoError?.let(fallos::add)
+                    }
+                    op.cuenta?.let {
+                        editor.fijarCuenta(id, it)
+                        editor.ultimoError?.let(fallos::add)
+                    }
+                    if (fallos.isNotEmpty()) {
+                        anotaciones.add("${op.tipo}: ${fallos.joinToString("; ")}")
+                    }
                     null
                 }
             }
@@ -132,6 +144,10 @@ class Aplicador(
         is Escalar -> conObjetivo(op.objetivo) { id -> intentar { editor.escalarPieza(id, op.factor) } }
 
         is Acotar -> conObjetivo(op.objetivo) { id -> intentar { editor.escalarACota(id, op.eje, op.medida) } }
+
+        is Holgura -> conObjetivo(op.objetivo) { id ->
+            intentar { editor.holgar(id, op.eje, op.medida, op.encaje, op.ajuste, op.nombreDeLaMedida) }
+        }
 
         is Renombrar -> conObjetivo(op.objetivo) { id -> intentar { editor.renombrar(id, op.nombre) } }
 
@@ -214,6 +230,7 @@ class Aplicador(
                     creadas.add(broca)
                     op.alias?.let { alias[it] = broca }
                 }
+                editor.avisoDeTaladro?.let { anotaciones.add(it) }
             }
             problema
         }
@@ -234,7 +251,7 @@ class Aplicador(
             if (op.contra != null && contra == null) {
                 "no se sabe qué es «${op.contra}»"
             } else {
-                intentar { editor.filetearEntre(objetivo, contra, op.radio) }
+                intentar { editor.filetearEntre(objetivo, contra, op.radio, op.chaflan) }
             }
         }
 

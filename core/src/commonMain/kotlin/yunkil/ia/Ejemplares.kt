@@ -131,6 +131,68 @@ object Ejemplares {
             """,
         ),
 
+        // ------------------------------------------------------------ encajes
+        // Los tres aplican `holgura`, y están aquí por la lección que más veces se ha
+        // repetido en este proyecto: una operación **nombrada** en la lista del prompt
+        // no se usa; **vista aplicada**, sí. Sin estos, `holgura` sería una entrada de
+        // vocabulario que nadie escribe nunca.
+        //
+        // Los tres llevan además `ajuste` y `nombreDeLaMedida`, y no por adorno: sin ver
+        // los tres campos juntos el modelo escribe `holgura` a secas, y entonces un
+        // pasacables y un tapón salen con la misma holgura y la medida del mundo queda
+        // en el documento sin nombre, imposible de corregir sin adivinar cuál era.
+        Ejemplar(
+            nombre = "Tapón de tubo",
+            peticion = "un tapón para tapar un tubo de 20 mm de diámetro interior",
+            etiquetas = listOf("tapon", "tubo", "encaje", "entra", "holgura", "obturador", "cierre"),
+            plan = """
+            {"resumen":"Tapón con vástago que entra en el tubo y reborde que hace tope",
+             "reemplazar":true,"operaciones":[
+              {"op":"crear","tipo":"CILINDRO","alias":"vastago","nombre":"Vástago",
+               "parametros":{"radio":12,"altura":18,"redondeo":1}},
+              {"op":"holgura","objetivo":"vastago","eje":"X","medida":20,"encaje":"ENTRA",
+               "ajuste":"AJUSTADO","nombreDeLaMedida":"diámetro interior del tubo"},
+              {"op":"crear","tipo":"CILINDRO","alias":"reborde","nombre":"Reborde",
+               "parametros":{"radio":14,"altura":4,"redondeo":1}},
+              {"op":"colocar","objetivo":"reborde","referencia":"vastago","cara":"arriba","centrar":true}
+            ]}
+            """,
+        ),
+        Ejemplar(
+            nombre = "Pasamuros de cable",
+            peticion = "un pasamuros para sacar un cable de 6 mm por un agujero",
+            etiquetas = listOf("pasamuros", "cable", "casquillo", "recibe", "holgura", "buje", "paso"),
+            plan = """
+            {"resumen":"Casquillo con brida y paso interior holgado para el cable",
+             "reemplazar":true,"operaciones":[
+              {"op":"crear","tipo":"DIFERENCIA","alias":"cuerpo","nombre":"Cuerpo"},
+              {"op":"crear","tipo":"CILINDRO","alias":"brida","padre":"cuerpo","nombre":"Brida",
+               "parametros":{"radio":11,"altura":14,"redondeo":1}},
+              {"op":"crear","tipo":"CILINDRO","alias":"paso","padre":"cuerpo","nombre":"Paso",
+               "parametros":{"radio":4,"altura":24}},
+              {"op":"holgura","objetivo":"paso","eje":"X","medida":6,"encaje":"RECIBE",
+               "ajuste":"LIBRE","nombreDeLaMedida":"diámetro del cable"}
+            ]}
+            """,
+        ),
+        Ejemplar(
+            nombre = "Tapa con labio",
+            peticion = "una tapa que encaje dentro de una caja de 50 mm de boca",
+            etiquetas = listOf("tapa", "labio", "encaje", "entra", "holgura", "cierre", "boca"),
+            plan = """
+            {"resumen":"Tapa con labio que entra en la boca y ala que apoya en el borde",
+             "reemplazar":true,"operaciones":[
+              {"op":"crear","tipo":"CAJA","alias":"ala","nombre":"Ala",
+               "parametros":{"anchura":56,"altura":4,"profundidad":56,"redondeo":2}},
+              {"op":"crear","tipo":"CAJA","alias":"labio","nombre":"Labio",
+               "parametros":{"anchura":50,"altura":6,"profundidad":50}},
+              {"op":"holgura","objetivo":"labio","eje":"X","medida":50,"encaje":"ENTRA",
+               "ajuste":"DESLIZANTE","nombreDeLaMedida":"boca de la caja"},
+              {"op":"colocar","objetivo":"labio","referencia":"ala","cara":"abajo","centrar":true}
+            ]}
+            """,
+        ),
+
         // ------------------------------------------------------------ contenedores
         Ejemplar(
             nombre = "Caja con tapa",

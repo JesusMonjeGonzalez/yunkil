@@ -60,6 +60,17 @@ tasks.register<JavaExec>("bancoDeHilo") {
     isIgnoreExitValue = true
 }
 
+tasks.register<JavaExec>("pruebaDeVista") {
+    group = "verification"
+    description = "Enseña al crítico visual pares de piezas buena/mala y mide si las distingue"
+    val compilacion = kotlin.jvm().compilations.getByName("main")
+    dependsOn(compilacion.compileTaskProvider)
+    classpath(compilacion.output.allOutputs, compilacion.runtimeDependencyFiles)
+    mainClass.set("yunkil.tools.PruebaDeVistaKt")
+    // Que el crítico no distinga es un dato que hay que poder leer, no una build rota.
+    isIgnoreExitValue = true
+}
+
 tasks.register<JavaExec>("verMalla") {
     group = "verification"
     description = "Exporta un demo a STL, lo reimporta, lo hornea y dibuja las dos versiones"

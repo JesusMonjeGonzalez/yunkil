@@ -6,6 +6,7 @@ import yunkil.doc.FormaDePerfil
 import yunkil.doc.Pieza
 import yunkil.doc.TipoPieza
 import yunkil.doc.compilar
+import yunkil.fabricacion.PerfilFabricacion
 import yunkil.kernel.Extrusion
 import yunkil.kernel.Perfil2D
 import yunkil.kernel.Punto2
@@ -19,6 +20,45 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class PerfilTest {
+
+    @Test
+    fun `un perfil que se cruza se rechaza antes de llegar al sdf`() {
+        val editor = Editor(Documento.vacio())
+        editor.anadir("EXTRUSION", null)
+        val id = assertNotNull(editor.seleccionado)
+        val antes = editor.aJson()
+
+        assertTrue(!editor.fijarPuntosDelPerfil(id, listOf(0f, 0f, 20f, 20f, 0f, 20f, 20f, 0f)))
+        assertTrue(editor.ultimoError?.contains("cruza") == true)
+        assertEquals(antes, editor.aJson())
+    }
+
+    @Test
+    fun `el fantasma usa exactamente el perfil con el que se aplicara`() {
+        val fuente = Editor(Documento.vacio())
+        val plan = assertNotNull(
+            fuente.interpretarPlan(
+                """
+                {"reemplazar":true,"operaciones":[
+                  {"op":"crear","tipo":"CAJA","alias":"caja","parametros":{"anchura":30,"altura":20,"profundidad":25}},
+                  {"op":"pared","objetivo":"caja"}
+                ]}
+                """.trimIndent(),
+            ).plan,
+        )
+        val perfil = PerfilFabricacion.VERIFICADOS.first { it.material == "PETG" }
+
+        assertTrue(fuente.previsualizar(plan, null, perfil.nombre))
+        val aplicado = Editor(Documento.vacio())
+        assertTrue(aplicado.aplicarPlan(plan, perfil.nombre).exito)
+
+        val uniformsAplicados = aplicado.uniforms()
+        assertEquals(
+            uniformsAplicados,
+            fuente.uniforms().takeLast(uniformsAplicados.size),
+            "el fantasma no representa la geometría que dejará el perfil activo",
+        )
+    }
 
     // ------------------------------------------------------------------ 2D
 

@@ -119,12 +119,15 @@ val TipoPieza.asas: Map<Asa, String>
         TipoPieza.REVOLUCION,
         TipoPieza.BARRIDO,
         TipoPieza.MALLA,
+        TipoPieza.ESCULTURA,
         TipoPieza.UNION,
         TipoPieza.DIFERENCIA,
         TipoPieza.INTERSECCION,
         TipoPieza.VACIADO,
+        TipoPieza.DESFASE,
         TipoPieza.SIMETRIA,
         TipoPieza.REPETICION,
+        TipoPieza.REPETICION_CIRCULAR,
         -> emptyMap()
     }
 

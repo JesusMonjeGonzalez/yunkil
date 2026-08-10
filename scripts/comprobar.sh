@@ -9,8 +9,10 @@
 #   2. La paridad CPU↔GPU: si el shader y `SdfNode.evaluar` divergen, el viewport
 #      enseña una pieza y el analizador razona sobre otra. Es el invariante que
 #      sostiene el resto del producto.
-#   3. El rayo de la cámara: un signo invertido aquí no da error, da otra pieza.
-#   4. Que la aplicación de escritorio compile y enlace contra el núcleo real.
+#   3. La previsualización fantasma: se dibuja de verdad y se cuentan los píxeles, que
+#      es lo único que dice si lo que se añade sale verde y lo que se quita, rojo.
+#   4. El rayo de la cámara: un signo invertido aquí no da error, da otra pieza.
+#   5. Que la aplicación de escritorio compile y enlace contra el núcleo real.
 #
 #     ./scripts/comprobar.sh          # todo
 #     ./scripts/comprobar.sh nucleo   # solo las pruebas del núcleo, que es lo rápido
@@ -36,6 +38,10 @@ paso "Paridad CPU ↔ GPU"
 ./gradlew :core:volcarParidad --console=plain -q
 swiftc -O tools/paridad/main.swift -o build/paridad-arnes
 ./build/paridad-arnes core/build/paridad || fallos=$((fallos + 1))
+
+paso "Previsualización fantasma"
+swiftc -O tools/fantasma/main.swift apps/mac/Sources/Camara.swift -o build/fantasma-arnes
+./build/fantasma-arnes core/build/paridad || fallos=$((fallos + 1))
 
 paso "Rayo de la cámara"
 swiftc -O tools/rayo/main.swift apps/mac/Sources/Camara.swift -o build/rayo-arnes
