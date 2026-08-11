@@ -3,6 +3,8 @@ package yunkil.doc
 import kotlinx.serialization.json.Json
 import yunkil.fabricacion.AccionCorrectora
 import yunkil.fabricacion.AnalizadorFdm
+import yunkil.fabricacion.CatalogoDePerfiles
+import yunkil.fabricacion.CuponDeCalibracion
 import yunkil.fabricacion.BuscadorDeOrientacion
 import yunkil.fabricacion.Correccion
 import yunkil.fabricacion.Estandares
@@ -1838,6 +1840,9 @@ class Editor(inicial: Documento = Documento.vacio()) {
     /** De dónde salen sus umbrales: de fábrica, editados, o calibrados en esta máquina. */
     fun origenDelPerfil(): String = perfilDeFabricacion.origen.etiqueta
 
+    /** De qué perfil salió el activo, si salió de otro. Vacío si es uno de fábrica. */
+    fun baseDelPerfil(): String = perfilDeFabricacion.derivadoDe ?: ""
+
     /** La holgura que el perfil vigente aplica a un encaje deslizante, en milímetros. */
     fun holguraDelPerfil(): Float = perfilDeFabricacion.holguraEncaje
 
@@ -2846,8 +2851,90 @@ class Editor(inicial: Documento = Documento.vacio()) {
     // ------------------------------------------------------------------ fabricación
 
     /** Nombres de los perfiles de fabricación disponibles. */
-    fun perfilesDeFabricacion(): List<String> =
-        PerfilFabricacion.VERIFICADOS.map { it.nombre }
+    fun perfilesDeFabricacion(): List<String> = CatalogoDePerfiles.todos.map { it.nombre }
+
+    /** Los que ha guardado el usuario, que son los únicos que se pueden borrar. */
+    fun perfilesPropios(): List<String> = CatalogoDePerfiles.propios.map { it.nombre }
+
+    /**
+     * Lee del disco los perfiles propios. Devuelve cuántos había, o −1 si el archivo está
+     * ilegible; en ese caso no se pierde nada, simplemente se sigue con los de fábrica.
+     */
+    fun cargarPerfiles(ruta: String): Int = CatalogoDePerfiles.cargarDesde(ruta)
+
+    // ------------------------------------------------------- calibrar con un cupón
+
+    /**
+     * Pone el cupón de calibración de un perfil en el documento, listo para exportar.
+     *
+     * Reemplaza lo que hubiera: el cupón es una probeta, no una pieza que se mezcle con el
+     * trabajo. Entra en el historial, así que un ⌘Z devuelve el documento de antes.
+     */
+    fun cargarCuponDeCalibracion(nombrePerfil: String): Boolean {
+        val perfil = PerfilFabricacion.porNombre(nombrePerfil)
+            ?: return rechazar("No existe el perfil «$nombrePerfil»")
+        reemplazarDocumento(CuponDeCalibracion.documento(perfil))
+        return true
+    }
+
+    /**
+     * Las holguras que ofrece cada estación del cupón, en el mismo orden en que van
+     * impresas. La estación que se traga el pasador sin bailar es la holgura de la máquina.
+     */
+    fun holgurasDelCupon(nombrePerfil: String): List<Float> {
+        val perfil = PerfilFabricacion.porNombre(nombrePerfil) ?: return emptyList()
+        return CuponDeCalibracion.estaciones(perfil).map { it.holgura }
+    }
+
+    /** El diámetro impreso de cada estación, para poder comprobarlo con el calibre. */
+    fun diametrosDelCupon(nombrePerfil: String): List<Float> {
+        val perfil = PerfilFabricacion.porNombre(nombrePerfil) ?: return emptyList()
+        return CuponDeCalibracion.estaciones(perfil).map { it.diametro(CuponDeCalibracion.NOMINAL) }
+    }
+
+    /**
+     * Guarda un perfil calibrado con la holgura que dio el cupón impreso, y lo activa.
+     *
+     * El nombre nuevo es obligatorio y no puede ser el de un perfil de fábrica: lo que se
+     * está guardando ya no son los números del fabricante, son los de una máquina concreta
+     * con un material concreto, y confundirlos es perder justo lo que se acaba de medir.
+     *
+     * @return el motivo si no se pudo, o `null` si quedó guardado y activo.
+     */
+    fun guardarPerfilCalibrado(
+        nombreBase: String,
+        nombreNuevo: String,
+        holgura: Float,
+        ruta: String,
+    ): String? {
+        val base = PerfilFabricacion.porNombre(nombreBase) ?: return "No existe el perfil «$nombreBase»"
+        val limpio = nombreNuevo.trim()
+        if (limpio.isEmpty()) return "El perfil calibrado necesita un nombre"
+        if (!holgura.isFinite() || holgura <= 0f) return "La holgura medida tiene que ser positiva"
+
+        val calibrado = base.calibradoCon(holgura).copy(nombre = limpio, derivadoDe = base.nombre)
+        CatalogoDePerfiles.guardar(calibrado, ruta)?.let { return it }
+        usarPerfilCalibrado(calibrado)
+        return null
+    }
+
+    /**
+     * Borra un perfil propio. Los de fábrica no se tocan.
+     *
+     * Si el borrado era el activo se vuelve **al perfil del que salió**, no al primero de la
+     * lista: quien calibró una A1 con PETG y borra su calibración sigue teniendo una A1
+     * delante, y devolverle la P1S sería cambiarle la impresora sin avisar.
+     */
+    fun olvidarPerfil(nombre: String, ruta: String): String? {
+        val borrado = CatalogoDePerfiles.porNombre(nombre)
+        val motivo = CatalogoDePerfiles.olvidar(nombre, ruta)
+        if (motivo == null && perfilDeFabricacion.nombre == nombre) {
+            val vuelta = borrado?.derivadoDe?.let { CatalogoDePerfiles.porNombre(it) }
+                ?: PerfilFabricacion.PREDETERMINADO
+            usarPerfilCalibrado(vuelta)
+        }
+        return motivo
+    }
 
     /**
      * Grosor mínimo de pared que exige un perfil, en milímetros.

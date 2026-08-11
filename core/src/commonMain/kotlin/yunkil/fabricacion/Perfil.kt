@@ -1,7 +1,11 @@
 package yunkil.fabricacion
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
 import yunkil.kernel.Vec3
+import yunkil.malla.escribirArchivo
+import yunkil.malla.leerArchivo
 
 /**
  * De dónde salen los umbrales de un perfil. Es lo primero que hay que poder
@@ -62,6 +66,16 @@ data class PerfilFabricacion(
     val volumenDeImpresion: Vec3,
 
     val origen: OrigenDelPerfil = OrigenDelPerfil.VERIFICADO,
+
+    /**
+     * De qué perfil salió este, si salió de otro.
+     *
+     * Un perfil calibrado es el de fábrica de una máquina concreta con la holgura medida en
+     * ella, y saber cuál era importa dos veces: para poder decir «calibrado sobre Bambu A1 ·
+     * PETG» en vez de dejar un nombre suelto, y para saber a dónde volver si se borra. Sin
+     * esto, olvidar la calibración de una A1 devolvía a la P1S, que es otra impresora.
+     */
+    val derivadoDe: String? = null,
 ) {
     init {
         require(boquilla > 0f && boquilla.isFinite()) { "La boquilla debe ser positiva" }
@@ -168,7 +182,96 @@ data class PerfilFabricacion(
 
         val PREDETERMINADO: PerfilFabricacion get() = VERIFICADOS.first()
 
-        fun porNombre(nombre: String): PerfilFabricacion? =
-            VERIFICADOS.firstOrNull { it.nombre == nombre }
+        /**
+         * Busca entre **todos** los perfiles, no solo entre los de fábrica.
+         *
+         * Que pase por el catálogo es lo que hace que un perfil calibrado exista de
+         * verdad: el nombre del perfil viaja como texto por media aplicación —el informe
+         * se pide con él, el analizador aislado lo resuelve en otro hilo— y mientras esta
+         * función solo mirara la lista de fábrica, calibrar la máquina y pedir el examen
+         * devolvía en silencio el análisis del perfil de partida.
+         */
+        fun porNombre(nombre: String): PerfilFabricacion? = CatalogoDePerfiles.porNombre(nombre)
+    }
+}
+
+/**
+ * Los perfiles que existen ahora mismo: los de fábrica más los que haya guardado quien
+ * calibró su máquina con un cupón.
+ *
+ * Es estado global, y lo es a propósito. El perfil activo se pasa por su **nombre** a
+ * través de toda la aplicación, incluido el editor aislado con el que se analiza en otro
+ * hilo; si el catálogo viviera dentro de un editor, ese editor de al lado no sabría
+ * resolver el nombre y contestaría con el perfil de fábrica sin decir nada. Se escribe al
+ * arrancar y al guardar una calibración, las dos veces desde el hilo de la interfaz.
+ *
+ * El archivo lo elige quien llama: dónde va la configuración de un usuario es cosa de cada
+ * plataforma, y el núcleo no tiene por qué opinar.
+ */
+object CatalogoDePerfiles {
+
+    private var guardados: List<PerfilFabricacion> = emptyList()
+
+    private val formato = Json { prettyPrint = true; ignoreUnknownKeys = true }
+
+    /** Todos, con los de fábrica primero. */
+    val todos: List<PerfilFabricacion> get() = PerfilFabricacion.VERIFICADOS + guardados
+
+    /** Solo los que ha guardado el usuario. */
+    val propios: List<PerfilFabricacion> get() = guardados
+
+    fun porNombre(nombre: String): PerfilFabricacion? = todos.firstOrNull { it.nombre == nombre }
+
+    /**
+     * Lee el archivo de perfiles propios y devuelve cuántos había.
+     *
+     * Un archivo que no existe todavía no es un error: es la primera vez que se abre la
+     * aplicación. Uno corrupto sí se dice, y no se pierde: se deja como está y se sigue con
+     * los de fábrica, porque borrar la calibración de alguien por un carácter de más sería
+     * mucho peor que arrancar sin ella.
+     */
+    fun cargarDesde(ruta: String): Int {
+        val texto = leerArchivo(ruta)?.decodeToString() ?: return 0
+        guardados = try {
+            formato.decodeFromString(ListSerializer(PerfilFabricacion.serializer()), texto)
+        } catch (e: Exception) {
+            return -1
+        }
+        return guardados.size
+    }
+
+    /**
+     * Guarda un perfil propio y reescribe el archivo. Devuelve el motivo si no se puede.
+     *
+     * Un nombre que ya usa un perfil de fábrica se rechaza: dos perfiles con el mismo
+     * nombre y distintos números convertirían «lo tengo calibrado» en una lotería.
+     * Reemplazar uno propio sí se permite, que es lo que pasa al recalibrar.
+     */
+    fun guardar(perfil: PerfilFabricacion, ruta: String): String? {
+        if (PerfilFabricacion.VERIFICADOS.any { it.nombre == perfil.nombre }) {
+            return "«${perfil.nombre}» es un perfil de fábrica; dale otro nombre al tuyo"
+        }
+        val nuevos = guardados.filter { it.nombre != perfil.nombre } + perfil
+        if (!escribirArchivo(ruta, formato.encodeToString(ListSerializer(PerfilFabricacion.serializer()), nuevos).encodeToByteArray())) {
+            return "No se pudo escribir $ruta"
+        }
+        guardados = nuevos
+        return null
+    }
+
+    /** Quita un perfil propio. Los de fábrica no se pueden borrar. */
+    fun olvidar(nombre: String, ruta: String): String? {
+        if (guardados.none { it.nombre == nombre }) return "No hay ningún perfil tuyo llamado «$nombre»"
+        val nuevos = guardados.filter { it.nombre != nombre }
+        if (!escribirArchivo(ruta, formato.encodeToString(ListSerializer(PerfilFabricacion.serializer()), nuevos).encodeToByteArray())) {
+            return "No se pudo escribir $ruta"
+        }
+        guardados = nuevos
+        return null
+    }
+
+    /** Vuelve a dejar solo los de fábrica, sin tocar el disco. Para arrancar limpio y para las pruebas. */
+    fun vaciar() {
+        guardados = emptyList()
     }
 }

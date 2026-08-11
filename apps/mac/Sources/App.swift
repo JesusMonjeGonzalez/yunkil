@@ -627,6 +627,14 @@ final class EstadoDeLaApp: ObservableObject {
 
     init() {
         resolucionExportacion = editor.resolucionSugerida()
+        // Los perfiles calibrados del usuario, antes de nada: el que quedó elegido la última
+        // vez puede ser uno de ellos, y sin cargarlos la aplicación arrancaría con la
+        // impresora de fábrica sin decir nada.
+        _ = editor.cargarPerfiles(ruta: Self.rutaDePerfiles)
+        if !editor.perfilesDeFabricacion().contains(perfilDeFabricacion) {
+            perfilDeFabricacion = PerfilFabricacion.companion.PREDETERMINADO.nombre
+        }
+        _ = editor.usarPerfil(nombre: perfilDeFabricacion)
         refrescar(recompilo: true)
     }
 
@@ -1968,6 +1976,104 @@ final class EstadoDeLaApp: ObservableObject {
 
     var perfilesDisponibles: [String] { editor.perfilesDeFabricacion() }
 
+    /// Los que ha calibrado quien usa esto, que son los únicos que se pueden borrar.
+    var perfilesPropios: [String] { editor.perfilesPropios() }
+
+    var perfilActivoEsPropio: Bool { perfilesPropios.contains(perfilDeFabricacion) }
+
+    /// De dónde salen los umbrales del perfil activo. Un aviso sin procedencia es una
+    /// opinión; con ella es un dato, y eso incluye saber sobre qué máquina se calibró.
+    var procedenciaDelPerfil: String {
+        let base = editor.baseDelPerfil()
+        return base.isEmpty ? editor.origenDelPerfil() : "\(editor.origenDelPerfil()) · sobre \(base)"
+    }
+
+    /// Dónde se guardan los perfiles calibrados.
+    ///
+    /// En Application Support y no junto al documento: la calibración es de la **máquina**,
+    /// no de la pieza. El mismo perfil vale para todo lo que se imprima en ella, y viajar
+    /// dentro de un `.yunkil` haría que abrir el archivo de otro te cambiara la impresora.
+    /// Es `var` por una sola razón: el arnés de `tools/estado` la reapunta a una carpeta
+    /// temporal. Un arnés que escribiera aquí borraría la calibración de quien lo ejecute.
+    static var rutaDePerfiles: String = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let carpeta = (base ?? URL(fileURLWithPath: NSHomeDirectory())).appendingPathComponent("Yunkil", isDirectory: true)
+        try? FileManager.default.createDirectory(at: carpeta, withIntermediateDirectories: true)
+        return carpeta.appendingPathComponent("perfiles.json").path
+    }()
+
+    /// Cambia el perfil de trabajo **de verdad**.
+    ///
+    /// El desplegable escribía una cadena que solo usaba el analizador, así que elegir otra
+    /// impresora no movía ni una cota: las que gobierna un encaje seguían derivadas con la
+    /// holgura de la anterior. Pasar por el editor es lo que hace visible que el encaje está
+    /// vivo —de una boquilla de 0,4 a una de 0,6 las piezas que encajan se mueven solas—, y
+    /// es media tesis del producto.
+    func fijarPerfil(_ nombre: String) {
+        guard perfilesDisponibles.contains(nombre) else { return }
+        perfilDeFabricacion = nombre
+        UserDefaults.standard.set(nombre, forKey: "fab.perfil")
+        _ = editor.usarPerfil(nombre: nombre)
+        aviso = editor.ultimoError
+        refrescar(recompilo: false)
+        if informe != nil { analizarFabricacion() }
+    }
+
+    // MARK: Calibrar la máquina
+
+    /// Lo que hay que mirar en el cupón impreso: qué estación se traga el pasador.
+    var estacionesDelCupon: [(indice: Int, diametro: Float, holgura: Float)] {
+        let holguras = editor.holgurasDelCupon(nombrePerfil: perfilDeFabricacion).map { $0.floatValue }
+        let diametros = editor.diametrosDelCupon(nombrePerfil: perfilDeFabricacion).map { $0.floatValue }
+        guard holguras.count == diametros.count else { return [] }
+        return holguras.indices.map { (indice: $0 + 1, diametro: diametros[$0], holgura: holguras[$0]) }
+    }
+
+    /// Pone la probeta en el documento, lista para exportar e imprimir.
+    func generarCuponDeCalibracion() {
+        guard editor.cargarCuponDeCalibracion(nombrePerfil: perfilDeFabricacion) else {
+            aviso = editor.ultimoError ?? "No se pudo preparar el cupón."
+            return
+        }
+        refrescar(recompilo: true)
+        renderizador?.encuadrar()
+        aviso = "Exporta el cupón e imprímelo. Luego prueba qué estación se traga el pasador."
+    }
+
+    /// Guarda lo que ha dado la máquina real y lo deja activo.
+    func guardarCalibracion(estacion: Int, nombre: String) {
+        let holguras = editor.holgurasDelCupon(nombrePerfil: perfilDeFabricacion)
+        guard estacion >= 0, estacion < holguras.count else {
+            aviso = "Elige la estación que entró en el cupón impreso."
+            return
+        }
+        let limpio = nombre.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let motivo = editor.guardarPerfilCalibrado(
+            nombreBase: perfilDeFabricacion,
+            nombreNuevo: limpio,
+            holgura: holguras[estacion].floatValue,
+            ruta: Self.rutaDePerfiles
+        ) {
+            aviso = motivo
+            return
+        }
+        perfilDeFabricacion = limpio
+        UserDefaults.standard.set(limpio, forKey: "fab.perfil")
+        refrescar(recompilo: false)
+        if informe != nil { analizarFabricacion() }
+        aviso = "«\(limpio)» guardado y activo: la holgura es ya la que mide tu máquina."
+    }
+
+    func olvidarPerfil(_ nombre: String) {
+        if let motivo = editor.olvidarPerfil(nombre: nombre, ruta: Self.rutaDePerfiles) {
+            aviso = motivo
+            return
+        }
+        perfilDeFabricacion = editor.perfilDeTrabajo()
+        UserDefaults.standard.set(perfilDeFabricacion, forKey: "fab.perfil")
+        refrescar(recompilo: false)
+    }
+
     /// Examina la pieza contra el perfil de impresora elegido.
     ///
     /// Corre fuera del hilo principal porque malla el modelo a resolución de
@@ -2143,6 +2249,10 @@ struct VistaPrincipal: View {
     @State private var medidaClave = ""
     @State private var modoAvanzado = false
     @State private var editandoPerfil = false
+    /// La sección de calibrar, plegada: se usa una vez por máquina, no cada día.
+    @State private var calibrando = false
+    @State private var estacionElegida = 0
+    @State private var nombreCalibrado = ""
     /// Radio del próximo filete. 1,5 mm es lo que aguanta una pared impresa normal sin
     /// comerse el canto.
     @State private var radioDeFilete: Float = 1.5
@@ -2984,15 +3094,83 @@ struct VistaPrincipal: View {
     /// Cada aviso enseña lo medido, el umbral con el que se compara y de qué perfil
     /// sale ese umbral. Un aviso que no dice contra qué compara no se puede discutir,
     /// y lo que no se puede discutir se acaba ignorando.
+    /// Calibrar la máquina: imprimir una probeta y decirle a Yunkil qué salió.
+    ///
+    /// Es el único sitio del producto donde un número deja de ser una tabla y pasa a ser una
+    /// medida de **esta** impresora con **este** material. Va aquí, debajo del perfil, y no
+    /// en un asistente aparte: se calibra mirando el mismo perfil que se está usando.
+    @ViewBuilder
+    private var calibracion: some View {
+        DisclosureGroup(isExpanded: $calibrando) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Imprime la probeta y prueba qué estación se traga el pasador sin bailar. "
+                     + "Esa es la holgura de tu máquina.")
+                    .pieDeAyuda()
+
+                Button("Poner el cupón en el documento", systemImage: "ruler") {
+                    estado.generarCuponDeCalibracion()
+                }
+                .controlSize(.small)
+
+                let estaciones = estado.estacionesDelCupon
+                if !estaciones.isEmpty {
+                    Picker("Estación", selection: $estacionElegida) {
+                        ForEach(Array(estaciones.enumerated()), id: \.offset) { i, e in
+                            Text("\(e.indice) · ⌀\(Cifra.texto(e.diametro, decimales: 2)) mm"
+                                 + " · holgura \(Cifra.texto(e.holgura, decimales: 2))")
+                                .tag(i)
+                        }
+                    }
+                    .labelsHidden().controlSize(.small)
+
+                    TextField("Nombre del perfil calibrado", text: $nombreCalibrado)
+                        .textFieldStyle(.roundedBorder).controlSize(.small)
+                        .font(Tipo.menor)
+
+                    HStack(spacing: 6) {
+                        Button("Guardar calibración") {
+                            let propuesto = nombreCalibrado.trimmingCharacters(in: .whitespaces)
+                            estado.guardarCalibracion(
+                                estacion: estacionElegida,
+                                nombre: propuesto.isEmpty ? "\(estado.perfilDeFabricacion) · mi máquina" : propuesto
+                            )
+                        }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+
+                        if estado.perfilActivoEsPropio {
+                            Button("Olvidar") { estado.olvidarPerfil(estado.perfilDeFabricacion) }
+                                .controlSize(.small)
+                                .help("Borra este perfil calibrado y vuelve al de fábrica")
+                        }
+                    }
+
+                    Text("Se guarda aparte del documento: la calibración es de la máquina, "
+                         + "no de la pieza.")
+                        .pieDeAyuda()
+                }
+            }
+            .padding(.top, 4)
+        } label: {
+            Text("Calibrar la máquina").font(Tipo.menor.weight(.semibold))
+        }
+        .font(Tipo.menor)
+    }
+
     @ViewBuilder
     private var panelDeFabricacion: some View {
-        Picker("Perfil", selection: $estado.perfilDeFabricacion) {
+        Picker("Perfil", selection: Binding(
+            get: { estado.perfilDeFabricacion },
+            // Por `fijarPerfil` y no escribiendo la cadena: cambiar de impresora tiene que
+            // volver a derivar las cotas que gobierna un encaje, no solo el siguiente examen.
+            set: { estado.fijarPerfil($0) }
+        )) {
             ForEach(estado.perfilesDisponibles, id: \.self) { Text($0).tag($0) }
         }
         .labelsHidden().controlSize(.small)
-        .onChange(of: estado.perfilDeFabricacion) { _, _ in
-            if estado.informe != nil { estado.analizarFabricacion() }
-        }
+
+        Text(estado.procedenciaDelPerfil)
+            .font(Tipo.pie)
+            .foregroundStyle(estado.perfilActivoEsPropio ? Tinta.calibre : Tinta.apagado)
 
         HStack(spacing: 6) {
             Button(estado.analizando ? "Analizando…" : "Analizar pieza", systemImage: "checkmark.seal") {
@@ -3011,6 +3189,8 @@ struct VistaPrincipal: View {
             .onChange(of: estado.analizarAlCrear) { _, nuevo in
                 UserDefaults.standard.set(nuevo, forKey: "fab.auto")
             }
+
+        calibracion
 
         if let informe = estado.informe {
             HStack(spacing: 6) {

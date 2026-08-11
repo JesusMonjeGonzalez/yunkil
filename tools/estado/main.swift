@@ -178,6 +178,83 @@ func arnes() {
         comprobar((estado.aviso ?? "").contains("STL"), "y el motivo lo dice: \(estado.aviso ?? "sin aviso")")
     }
 
+    // ------------------------------------------------------------ calibrar
+
+    print("\n— calibrar la máquina —")
+    do {
+        // A una carpeta temporal: un arnés que escribiera en Application Support borraría
+        // la calibración de quien lo ejecute.
+        let almacen = NSTemporaryDirectory() + "yunkil-arnes-perfiles.json"
+        try? FileManager.default.removeItem(atPath: almacen)
+        EstadoDeLaApp.rutaDePerfiles = almacen
+        CatalogoDePerfiles.shared.vaciar()
+        defer {
+            CatalogoDePerfiles.shared.vaciar()
+            try? FileManager.default.removeItem(atPath: almacen)
+        }
+
+        let estado = EstadoDeLaApp()
+        let deFabrica = estado.perfilDeFabricacion
+        let cuantos = estado.perfilesDisponibles.count
+
+        let estaciones = estado.estacionesDelCupon
+        comprobar(estaciones.count == 8, "el cupón ofrece ocho estaciones (\(estaciones.count))")
+        comprobar(
+            estaciones.first.map { $0.diametro > 8 } ?? false,
+            "y cada una es más ancha que el pasador de 8 mm"
+        )
+
+        estado.generarCuponDeCalibracion()
+        comprobar(!estado.editor.estaVacio, "el cupón entra en el documento")
+
+        // La estación 5, digamos, es la que se tragó el pasador.
+        estado.guardarCalibracion(estacion: 4, nombre: "Arnés · mi máquina")
+        comprobar(estado.perfilDeFabricacion == "Arnés · mi máquina", "el perfil calibrado queda activo")
+        comprobar(estado.perfilActivoEsPropio, "y consta como propio")
+        comprobar(
+            casi(estado.editor.holguraDelPerfil(), estaciones[4].holgura),
+            "con la holgura de la estación elegida (\(estado.editor.holguraDelPerfil()) vs \(estaciones[4].holgura))"
+        )
+        comprobar(estado.perfilesDisponibles.count == cuantos + 1, "y sale en la lista de perfiles")
+
+        // Lo que estaba roto de raíz: el examen corre en un editor aparte que solo recibe
+        // el **nombre** del perfil. Si el nombre no se resuelve, se analiza con el de
+        // fábrica y nadie se entera.
+        comprobar(
+            PerfilFabricacion.companion.porNombre(nombre: "Arnés · mi máquina") != nil,
+            "cualquier editor puede resolver el perfil por su nombre"
+        )
+
+        // Y sigue ahí al volver a abrir.
+        let reabierta = EstadoDeLaApp()
+        comprobar(
+            reabierta.perfilesDisponibles.contains("Arnés · mi máquina"),
+            "al abrir otra vez la aplicación el perfil calibrado sigue estando"
+        )
+
+        estado.olvidarPerfil("Arnés · mi máquina")
+        comprobar(
+            estado.perfilDeFabricacion == deFabrica,
+            "olvidarlo devuelve al perfil del que salió, no al primero de la lista (\(estado.perfilDeFabricacion))"
+        )
+        comprobar(estado.perfilesDisponibles.count == cuantos, "y lo quita de la lista")
+    }
+
+    print("\n— cambiar de impresora mueve las cotas —")
+    do {
+        let estado = EstadoDeLaApp()
+        let antes = estado.editor.holguraDelPerfil()
+        let otro = estado.perfilesDisponibles.first { $0 != estado.perfilDeFabricacion }!
+
+        estado.fijarPerfil(otro)
+
+        comprobar(estado.editor.perfilDeTrabajo() == otro, "elegir en el desplegable cambia el perfil del editor")
+        comprobar(
+            estado.editor.holguraDelPerfil() != antes,
+            "y con él la holgura con la que se derivan los encajes (\(antes) → \(estado.editor.holguraDelPerfil()))"
+        )
+    }
+
     print("")
     if fallos == 0 {
         print("Estado de la aplicación: todo correcto.")

@@ -1,10 +1,13 @@
 package yunkil.cli
 
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.toKString
 import kotlinx.serialization.json.Json
+import platform.posix.getenv
 import yunkil.doc.Editor
 import yunkil.fabricacion.AnalizadorFdm
+import yunkil.fabricacion.CatalogoDePerfiles
 import yunkil.fabricacion.InformeDeFabricacion
-import yunkil.fabricacion.PerfilFabricacion
 import yunkil.malla.leerArchivo
 import kotlin.system.exitProcess
 
@@ -26,6 +29,10 @@ import kotlin.system.exitProcess
  * Es un ejecutable nativo: no hay JVM que instalar en la máquina que lo corra.
  */
 fun main(args: Array<String>) {
+    // Los perfiles calibrados del usuario, del mismo archivo que usa la aplicación: una
+    // máquina calibrada lo está mire quien la mire, desde la ventana o desde un script.
+    CatalogoDePerfiles.cargarDesde(rutaDePerfiles())
+
     val orden = args.firstOrNull() ?: ""
     val resto = args.drop(1)
     when (orden) {
@@ -56,7 +63,8 @@ private val AYUDA = """
           sale una comprobada—. Sin --detalle usa la resolución que el modelo sugiere.
 
       yunkil perfiles
-          Los perfiles de fabricación verificados, con sus números.
+          Los perfiles de fabricación: los de fábrica y los que hayas calibrado en la
+          aplicación con un cupón, que se leen del mismo archivo.
 """.trimIndent()
 
 /** El informe entero, para quien vaya a leerlo con un script y no con los ojos. */
@@ -161,8 +169,8 @@ private fun exportar(args: List<String>): Int {
 // ---------------------------------------------------------------------------- perfiles
 
 private fun perfiles(): Int {
-    println("Perfiles de fabricación verificados:")
-    for (p in PerfilFabricacion.VERIFICADOS) {
+    println("Perfiles de fabricación:")
+    for (p in CatalogoDePerfiles.todos) {
         println()
         println("  ${p.nombre}")
         fila("Boquilla", "${dec(p.boquilla, 2)} mm · capa ${dec(p.alturaCapa, 2)} mm", 4)
@@ -196,6 +204,13 @@ private fun cargar(editor: Editor, ruta: String): Boolean {
         fallo(editor.ultimoError ?: "No se pudo importar $ruta"); return false
     }
     return true
+}
+
+/** El almacén de perfiles calibrados, donde lo deja la aplicación. */
+@OptIn(ExperimentalForeignApi::class)
+private fun rutaDePerfiles(): String {
+    val casa = getenv("HOME")?.toKString() ?: return "perfiles.json"
+    return "$casa/Library/Application Support/Yunkil/perfiles.json"
 }
 
 private fun opcion(args: List<String>, nombre: String): String? {

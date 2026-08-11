@@ -105,9 +105,17 @@ El cupón se exporta apto a la resolución que sugiere la aplicación y a 0,6 / 
 contorneado: su escalón —el vástago sobre el pie— hacía que la malla se cruzara consigo
 misma y el certificado se negaba a escribir el archivo.
 
-Lo que falta para cerrar la cadena es guardar el perfil calibrado en disco: hoy vive en
-memoria y muere al cerrar la aplicación. Hasta entonces los perfiles siguen siendo
-`de fábrica`.
+El perfil calibrado **se guarda**, en `~/Library/Application Support/Yunkil/perfiles.json`
+y aparte del documento: la calibración es de la máquina, no de la pieza, y viajar dentro de
+un `.yunkil` haría que abrir el archivo de otro te cambiara la impresora. `CatalogoDePerfiles`
+los suma a los de fábrica, y `PerfilFabricacion.porNombre` pasa por él: el nombre del perfil
+viaja como texto —el informe se pide con él, y el editor aislado que analiza en otro hilo lo
+resuelve por su cuenta—, así que mientras esa búsqueda solo miraba la lista de fábrica,
+calibrar y pedir el examen devolvía en silencio el análisis del perfil de partida. Un perfil
+calibrado recuerda de cuál salió, para poder decirlo y para saber a dónde volver si se borra.
+
+Lo que falta para cerrar la cadena ya no es código: es imprimir cupones en máquinas de
+verdad y comprobar que la holgura que sale encaja.
 
 ### Motor orgánico nativo
 

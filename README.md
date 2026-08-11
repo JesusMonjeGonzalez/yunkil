@@ -96,7 +96,7 @@ docs/       detailed design, limits and implementation notes
 | Direct interaction | CPU ray picking, face manipulation, sectioning, orthographic views and transactional undo/redo |
 | Fit system | Provenance-aware measurements, governed dimensions, fit classes and final-geometry verification |
 | Organic modeling | Semantic SDF figures, variable-radius curves, additive/subtractive and field-deformation brushes, masks and symmetry |
-| Manufacturing | FDM profiles, wall/support/overhang analysis, orientation search and fit reports |
+| Manufacturing | FDM profiles, wall/support/overhang analysis, orientation search, fit reports and a printed calibration coupon that stores a per-machine clearance |
 | Import/export | STL import, `.yunkil` JSON documents, certified binary STL and 3MF export |
 
 ## Model-Assisted Workflow
@@ -176,13 +176,12 @@ verification gates.
 
 - Advanced prototype without sustained external print validation.
 - macOS/Apple Silicon application only; no finished iPad application.
-- Calibration generation and profile derivation exist, but editable calibrated profiles are not persisted yet.
 - The app harness drives the state layer, not the SwiftUI view tree: layout and rendered controls have no automated coverage.
 - No signed, notarized public release.
 
 ## Current Focus
 
-1. Complete persistent machine calibration and real-print validation.
+1. Validate the calibrated clearance against real prints on real machines.
 2. Sign and notarize a public release.
 3. Bring the fit system to an iPad application.
 
