@@ -354,6 +354,14 @@ final class VistaMetalInteractiva: MTKView {
 
     // MARK: - Resalte
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Sin esto la ventana puede no repartir los movimientos del ratón, y el resalte del
+        // gizmo se quedaría muerto sin que nada lo indicara: no da error, simplemente no
+        // pasa nada al pasar por encima.
+        window?.acceptsMouseMovedEvents = true
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         for area in trackingAreas { removeTrackingArea(area) }
