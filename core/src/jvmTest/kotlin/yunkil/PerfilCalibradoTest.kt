@@ -149,6 +149,65 @@ class PerfilCalibradoTest {
     }
 
     @Test
+    fun `editar los umbrales a mano guarda un perfil propio y lo activa`() {
+        val editor = Editor(Documento.vacio())
+        val motivo = editor.guardarPerfilEditado(
+            nombreBase = deFabrica, nombreNuevo = "P1S · boquilla de 0,25",
+            boquilla = 0.25f, alturaCapa = 0.12f, perimetros = 3,
+            anguloVoladizoMaximo = 45f, areaBaseMinima = 60f, esbeltezMaxima = 7f,
+            holguraEncaje = 0.15f, ruta = archivo,
+        )
+
+        assertNull(motivo, "no se pudo guardar")
+        assertEquals("P1S · boquilla de 0,25", editor.perfilDeTrabajo())
+        val guardado = assertNotNull(PerfilFabricacion.porNombre("P1S · boquilla de 0,25"))
+        assertEquals(0.25f, guardado.boquilla, 1e-4f)
+        assertEquals(0.75f, guardado.grosorMinimoPared, 1e-4f, "tres perímetros de 0,25")
+        assertEquals(deFabrica, guardado.derivadoDe, "hay que poder ver de dónde salió")
+    }
+
+    @Test
+    fun `tocar a mano un perfil calibrado le quita la etiqueta de calibrado`() {
+        // «Calibrado en tu máquina» dice que esos números salieron de una pieza impresa y
+        // medida. En cuanto alguien toca uno a mano deja de ser cierto, y la etiqueta solo
+        // vale mientras se pueda creer.
+        val editor = Editor(Documento.vacio())
+        editor.guardarPerfilCalibrado(deFabrica, "Mi P1S", 0.26f, archivo)
+        assertEquals(OrigenDelPerfil.CALIBRADO, assertNotNull(PerfilFabricacion.porNombre("Mi P1S")).origen)
+
+        val u = editor.umbralesDelPerfil()
+        editor.guardarPerfilEditado(
+            nombreBase = "Mi P1S", nombreNuevo = "Mi P1S retocada",
+            boquilla = u[0], alturaCapa = u[1], perimetros = 4,
+            anguloVoladizoMaximo = u[3], areaBaseMinima = u[4], esbeltezMaxima = u[5],
+            holguraEncaje = u[6], ruta = archivo,
+        )
+
+        val retocada = assertNotNull(PerfilFabricacion.porNombre("Mi P1S retocada"))
+        assertEquals(OrigenDelPerfil.EDITADO, retocada.origen)
+        assertEquals(0.26f, retocada.holguraEncaje, 1e-4f, "la holgura medida se conserva")
+        assertEquals(deFabrica, retocada.derivadoDe, "y sigue diciendo de qué máquina es")
+    }
+
+    @Test
+    fun `unos umbrales que no describen una impresora se rechazan con su motivo`() {
+        // Una altura de capa mayor que la boquilla no se puede imprimir: eso lo dice el
+        // constructor del perfil, y aquí lo único que hay que hacer es no tragárselo.
+        val editor = Editor(Documento.vacio())
+        val motivo = assertNotNull(
+            editor.guardarPerfilEditado(
+                nombreBase = deFabrica, nombreNuevo = "Imposible",
+                boquilla = 0.4f, alturaCapa = 0.9f, perimetros = 2,
+                anguloVoladizoMaximo = 50f, areaBaseMinima = 80f, esbeltezMaxima = 6f,
+                holguraEncaje = 0.2f, ruta = archivo,
+            ),
+            "debería rechazarse",
+        )
+        assertTrue("capa" in motivo, "el motivo debería explicarlo: $motivo")
+        assertTrue(editor.perfilesPropios().isEmpty(), "y no guardar nada")
+    }
+
+    @Test
     fun `el cupon entra en el documento con una estacion por holgura`() {
         val editor = Editor(Documento.vacio())
         assertTrue(editor.estaVacio, "el documento de partida no estaba vacío")

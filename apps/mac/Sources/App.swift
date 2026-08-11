@@ -2177,6 +2177,36 @@ final class EstadoDeLaApp: ObservableObject {
         aviso = "«\(limpio)» guardado y activo: la holgura es ya la que mide tu máquina."
     }
 
+    /// Los umbrales del perfil activo, para poder enseñarlos y editarlos.
+    var umbralesDelPerfil: [Float] { editor.umbralesDelPerfil().map { $0.floatValue } }
+
+    func guardarUmbrales(
+        nombre: String,
+        boquilla: Float, alturaCapa: Float, perimetros: Float,
+        voladizo: Float, areaBase: Float, esbeltez: Float, holgura: Float
+    ) {
+        if let motivo = editor.guardarPerfilEditado(
+            nombreBase: perfilDeFabricacion,
+            nombreNuevo: nombre,
+            boquilla: boquilla,
+            alturaCapa: alturaCapa,
+            perimetros: Int32(max(1, perimetros.rounded())),
+            anguloVoladizoMaximo: voladizo,
+            areaBaseMinima: areaBase,
+            esbeltezMaxima: esbeltez,
+            holguraEncaje: holgura,
+            ruta: Self.rutaDePerfiles
+        ) {
+            aviso = motivo
+            return
+        }
+        perfilDeFabricacion = nombre.trimmingCharacters(in: .whitespacesAndNewlines)
+        UserDefaults.standard.set(perfilDeFabricacion, forKey: "fab.perfil")
+        refrescar(recompilo: false)
+        if informe != nil { analizarFabricacion() }
+        aviso = "«\(perfilDeFabricacion)» guardado y activo."
+    }
+
     func olvidarPerfil(_ nombre: String) {
         if let motivo = editor.olvidarPerfil(nombre: nombre, ruta: Self.rutaDePerfiles) {
             aviso = motivo
@@ -2426,6 +2456,16 @@ struct VistaPrincipal: View {
     @State private var calibrando = false
     @State private var estacionElegida = 0
     @State private var nombreCalibrado = ""
+    /// Los umbrales del perfil mientras se editan, antes de guardarlos.
+    @State private var ajustandoUmbrales = false
+    @State private var boquilla: Float = 0.4
+    @State private var alturaCapa: Float = 0.2
+    @State private var perimetros: Float = 2
+    @State private var voladizo: Float = 50
+    @State private var areaBase: Float = 80
+    @State private var esbeltez: Float = 6
+    @State private var holgura: Float = 0.2
+    @State private var nombreUmbrales = ""
     /// Radio del próximo filete. 1,5 mm es lo que aguanta una pared impresa normal sin
     /// comerse el canto.
     @State private var radioDeFilete: Float = 1.5
@@ -3268,6 +3308,74 @@ struct VistaPrincipal: View {
     /// Cada aviso enseña lo medido, el umbral con el que se compara y de qué perfil
     /// sale ese umbral. Un aviso que no dice contra qué compara no se puede discutir,
     /// y lo que no se puede discutir se acaba ignorando.
+    /// Los umbrales del perfil, a mano.
+    ///
+    /// Hasta aquí un perfil era una constante verificada que se elegía de una lista, y eso
+    /// deja fuera a cualquiera con una boquilla de 0,25, un material que cuelga peor de lo
+    /// que dice la tabla o una cama que agarra mejor. Cada número de estos es el umbral que
+    /// un aviso cita cuando protesta, así que poder cambiarlos es poder discutir con el
+    /// analizador en vez de aprender a ignorarlo.
+    @ViewBuilder
+    private var umbrales: some View {
+        DisclosureGroup(isExpanded: $ajustandoUmbrales) {
+            VStack(alignment: .leading, spacing: 6) {
+                campoDeUmbral("Boquilla", $boquilla, "mm")
+                campoDeUmbral("Capa", $alturaCapa, "mm")
+                campoDeUmbral("Perímetros", $perimetros, "")
+                campoDeUmbral("Voladizo", $voladizo, "°")
+                campoDeUmbral("Base mínima", $areaBase, "mm²")
+                campoDeUmbral("Esbeltez", $esbeltez, "×")
+                campoDeUmbral("Holgura", $holgura, "mm")
+
+                TextField("Nombre del perfil", text: $nombreUmbrales)
+                    .textFieldStyle(.roundedBorder).controlSize(.small)
+                    .font(Tipo.menor)
+
+                Button("Guardar como perfil mío") {
+                    let propuesto = nombreUmbrales.trimmingCharacters(in: .whitespaces)
+                    estado.guardarUmbrales(
+                        nombre: propuesto.isEmpty ? "\(estado.perfilDeFabricacion) · a mi medida" : propuesto,
+                        boquilla: boquilla, alturaCapa: alturaCapa, perimetros: perimetros,
+                        voladizo: voladizo, areaBase: areaBase, esbeltez: esbeltez, holgura: holgura
+                    )
+                }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+
+                Text("Tocar un umbral a mano quita la etiqueta de «calibrado»: esa dice que "
+                     + "el número salió de una pieza impresa y medida.")
+                    .pieDeAyuda()
+            }
+            .padding(.top, 4)
+            // Al abrir la sección, y al cambiar de perfil, las casillas enseñan lo que hay.
+            .onAppear { leerUmbrales() }
+            .onChange(of: estado.perfilDeFabricacion) { _, _ in leerUmbrales() }
+        } label: {
+            Text("Ajustar los umbrales").font(Tipo.menor.weight(.semibold))
+        }
+        .font(Tipo.menor)
+    }
+
+    private func campoDeUmbral(_ etiqueta: String, _ valor: Binding<Float>, _ unidad: String) -> some View {
+        HStack(spacing: 6) {
+            Text(etiqueta).font(Tipo.menor).foregroundStyle(Tinta.cota)
+                .frame(width: 82, alignment: .leading)
+            TextField("", value: valor, format: .number.precision(.fractionLength(0...2)))
+                .textFieldStyle(.roundedBorder).controlSize(.small)
+                .font(Tipo.cifraFuerte)
+                .multilineTextAlignment(.trailing)
+            Text(unidad).font(Tipo.pie).foregroundStyle(Tinta.apagado)
+                .frame(width: 24, alignment: .leading)
+        }
+    }
+
+    private func leerUmbrales() {
+        let u = estado.umbralesDelPerfil
+        guard u.count == 7 else { return }
+        boquilla = u[0]; alturaCapa = u[1]; perimetros = u[2]
+        voladizo = u[3]; areaBase = u[4]; esbeltez = u[5]; holgura = u[6]
+        nombreUmbrales = ""
+    }
+
     /// Calibrar la máquina: imprimir una probeta y decirle a Yunkil qué salió.
     ///
     /// Es el único sitio del producto donde un número deja de ser una tabla y pasa a ser una
@@ -3365,6 +3473,7 @@ struct VistaPrincipal: View {
             }
 
         calibracion
+        umbrales
 
         if let informe = estado.informe {
             HStack(spacing: 6) {

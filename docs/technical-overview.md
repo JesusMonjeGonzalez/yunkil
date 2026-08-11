@@ -39,6 +39,8 @@ Kotlin para iOS, pero no hay todavía una aplicación iPad terminada.
 - Vaciado, desfase positivo/negativo, simetría y repeticiones lineales y circulares.
 - Patrón circular en X/Y/Z, hasta 64 copias y ángulo total editable.
 - Taladros, paredes, nervios, encajes, patrones normalizados y perfiles de fabricación.
+- Perfiles de fabricación propios: calibrados con el cupón o editados umbral a umbral, y
+  guardados aparte del documento porque son de la máquina y no de la pieza.
 - Selección por raymarching CPU, manipulación directa de caras, sección y orientación.
 - Gizmo de mover, girar y escalar sobre el centro de la pieza, con resalte al pasar el
   ratón y ajuste de 1 mm y 15° manteniendo ⇧.
@@ -415,9 +417,9 @@ ni documentos.
 
 - El editor visual de perfiles solo manipula segmentos rectos; arcos y Bézier existen en el
   núcleo pero no tienen edición visual completa.
-- Los perfiles se calibran con el cupón y se guardan, pero no se editan umbral a umbral ni
-  tienen versión propia: se puede cambiar la holgura midiendo, no la boquilla ni el voladizo
-  a mano. Y ninguna holgura calibrada se ha contrastado todavía con impresiones sostenidas,
+- Los perfiles se calibran, se editan umbral a umbral y se guardan, pero no tienen versión
+  propia: no se puede volver a una edición anterior. Y ninguna holgura calibrada se ha
+  contrastado todavía con impresiones sostenidas,
   así que Yunkil garantiza que la geometría tiene la holgura declarada; que esa holgura sea
   la buena para tu máquina depende de lo bien que hayas leído tu cupón.
 - Un encaje gobierna la extensión de la pieza en **un** eje y la ajusta escalando
@@ -473,8 +475,8 @@ sino cerrar confianza, reproducibilidad e interacción. Añadir formas nuevas qu
 2. Selección y modificación directa de partes orgánicas, incluidos los puntos de control
    de una curva agarrados en el viewport.
 3. Ensamblajes ligeros e interferencias, ahora que el gizmo coloca piezas de verdad.
-4. Editar y versionar perfiles a mano, más allá de calibrarlos con el cupón y guardarlos,
-   que ya funciona.
+4. Versionar los perfiles: hoy se calibran, se editan y se guardan, pero una edición pisa
+   la anterior y no hay a dónde volver.
 5. Un encaje que gobierne dos cotas independientes. Hoy gobierna la extensión en un eje y
    la ajusta escalando uniformemente, así que atar el diámetro de un cilindro le mueve la
    altura; es coherente con la escala uniforme del sistema y aun así deja fuera media

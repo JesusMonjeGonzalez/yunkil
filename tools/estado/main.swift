@@ -344,6 +344,44 @@ func arnes() {
         comprobar(estado.perfilesDisponibles.count == cuantos, "y lo quita de la lista")
     }
 
+    print("\n— los umbrales a mano —")
+    do {
+        let almacen = NSTemporaryDirectory() + "yunkil-arnes-umbrales.json"
+        try? FileManager.default.removeItem(atPath: almacen)
+        EstadoDeLaApp.rutaDePerfiles = almacen
+        CatalogoDePerfiles.shared.vaciar()
+        defer {
+            CatalogoDePerfiles.shared.vaciar()
+            try? FileManager.default.removeItem(atPath: almacen)
+        }
+
+        let estado = EstadoDeLaApp()
+        let u = estado.umbralesDelPerfil
+        comprobar(u.count == 7, "el perfil enseña sus siete umbrales (\(u.count))")
+
+        estado.guardarUmbrales(
+            nombre: "Arnés · boquilla fina",
+            boquilla: 0.25, alturaCapa: 0.12, perimetros: 3,
+            voladizo: 45, areaBase: 60, esbeltez: 7, holgura: 0.15
+        )
+        comprobar(estado.perfilDeFabricacion == "Arnés · boquilla fina", "queda activo")
+        comprobar(casi(estado.umbralesDelPerfil[0], 0.25), "con la boquilla que se escribió")
+        comprobar(
+            casi(estado.editor.grosorMinimoDePared(nombrePerfil: estado.perfilDeFabricacion), 0.75),
+            "y la pared mínima sale de multiplicar, no de una tabla"
+        )
+
+        // Un número imposible se rechaza con su motivo y no se guarda a medias.
+        let cuantos = estado.perfilesPropios.count
+        estado.guardarUmbrales(
+            nombre: "Arnés · imposible",
+            boquilla: 0.4, alturaCapa: 0.9, perimetros: 2,
+            voladizo: 50, areaBase: 80, esbeltez: 6, holgura: 0.2
+        )
+        comprobar(estado.perfilesPropios.count == cuantos, "una capa más gruesa que la boquilla no se guarda")
+        comprobar((estado.aviso ?? "").contains("capa"), "y se dice por qué: \(estado.aviso ?? "sin aviso")")
+    }
+
     print("\n— cambiar de impresora mueve las cotas —")
     do {
         let estado = EstadoDeLaApp()

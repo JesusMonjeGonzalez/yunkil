@@ -10,6 +10,7 @@ import yunkil.fabricacion.Correccion
 import yunkil.fabricacion.Estandares
 import yunkil.fabricacion.InformeDeFabricacion
 import yunkil.fabricacion.OrientacionEvaluada
+import yunkil.fabricacion.OrigenDelPerfil
 import yunkil.fabricacion.AjusteDeTaladro
 import yunkil.fabricacion.PerfilFabricacion
 import yunkil.fabricacion.Roscas
@@ -2975,6 +2976,72 @@ class Editor(inicial: Documento = Documento.vacio()) {
         CatalogoDePerfiles.guardar(calibrado, ruta)?.let { return it }
         usarPerfilCalibrado(calibrado)
         return null
+    }
+
+    /**
+     * Guarda un perfil con los umbrales cambiados a mano, y lo activa.
+     *
+     * Es lo que faltaba para que un perfil sea de quien lo usa y no una constante: una
+     * boquilla de 0,25, un material que cuelga peor de lo que dice la tabla, una cama que
+     * agarra mejor. Los valores se validan en el constructor de [PerfilFabricacion] —una
+     * altura de capa mayor que la boquilla no se puede imprimir—, así que un número
+     * imposible se rechaza con su motivo en vez de guardarse.
+     *
+     * Queda marcado como `editado`, **también si se partía de uno calibrado**. Es
+     * deliberado: «calibrado en tu máquina» dice que esos números salieron de una pieza
+     * impresa y medida, y en cuanto alguien toca uno a mano deja de ser cierto. La etiqueta
+     * solo vale mientras se pueda creer. De dónde salió se conserva en `derivadoDe`.
+     */
+    fun guardarPerfilEditado(
+        nombreBase: String,
+        nombreNuevo: String,
+        boquilla: Float,
+        alturaCapa: Float,
+        perimetros: Int,
+        anguloVoladizoMaximo: Float,
+        areaBaseMinima: Float,
+        esbeltezMaxima: Float,
+        holguraEncaje: Float,
+        ruta: String,
+    ): String? {
+        val base = PerfilFabricacion.porNombre(nombreBase) ?: return "No existe el perfil «$nombreBase»"
+        val limpio = nombreNuevo.trim()
+        if (limpio.isEmpty()) return "El perfil necesita un nombre"
+        if (!holguraEncaje.isFinite() || holguraEncaje < 0f) return "La holgura no puede ser negativa"
+        if (areaBaseMinima < 0f || esbeltezMaxima <= 0f) return "El área de base y la esbeltez deben ser positivas"
+
+        val editado = try {
+            base.copy(
+                nombre = limpio,
+                boquilla = boquilla,
+                alturaCapa = alturaCapa,
+                perimetros = perimetros,
+                anguloVoladizoMaximo = anguloVoladizoMaximo,
+                areaBaseMinima = areaBaseMinima,
+                esbeltezMaxima = esbeltezMaxima,
+                holguraEncaje = holguraEncaje,
+                origen = OrigenDelPerfil.EDITADO,
+                derivadoDe = base.derivadoDe ?: base.nombre,
+            )
+        } catch (e: IllegalArgumentException) {
+            return e.message ?: "Esos umbrales no describen una impresora que pueda imprimir"
+        }
+
+        CatalogoDePerfiles.guardar(editado, ruta)?.let { return it }
+        usarPerfilCalibrado(editado)
+        return null
+    }
+
+    /**
+     * Los umbrales del perfil activo, en el mismo orden en que los pide
+     * [guardarPerfilEditado]: boquilla, altura de capa, perímetros, voladizo máximo, área
+     * mínima de base, esbeltez máxima y holgura.
+     */
+    fun umbralesDelPerfil(): List<Float> = with(perfilDeFabricacion) {
+        listOf(
+            boquilla, alturaCapa, perimetros.toFloat(),
+            anguloVoladizoMaximo, areaBaseMinima, esbeltezMaxima, holguraEncaje,
+        )
     }
 
     /**
