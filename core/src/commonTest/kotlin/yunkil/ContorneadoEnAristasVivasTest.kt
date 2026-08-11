@@ -1,6 +1,7 @@
 package yunkil
 
 import yunkil.kernel.Caja
+import yunkil.kernel.Diferencia
 import yunkil.kernel.Cilindro
 import yunkil.kernel.Esfera
 import yunkil.kernel.Perfil2D
@@ -24,18 +25,19 @@ import kotlin.test.assertTrue
  * pruebas acotan el fallo con la geometría más simple en la que aparece, que es donde se
  * puede razonar sobre él.
  *
- * Lo medido:
+ * La causa resultó ser la **diagonal del cuadrilátero**. Las cuatro celdas de una cara
+ * dual casi nunca dan cuatro puntos coplanares, así que elegir diagonal es elegir qué
+ * superficie se dibuja; se partía siempre por la misma. Mientras la superficie es suave da
+ * igual, porque las dos opciones se parecen. En una arista viva entrante los vértices se
+ * van a esquinas opuestas de sus celdas, y dos cuadriláteros vecinos partidos cada uno por
+ * la diagonal que se aleja de su arista común se pliegan el uno contra el otro. Esas dos
+ * mitades no comparten ningún vértice, así que el certificado las veía cruzarse.
  *
- *  - Un primitivo suelto —esfera, caja, cilindro, caja redondeada— **nunca** se cruza.
- *  - Un **escalón cóncavo** sí, y a unas resoluciones sí y a otras no. Da igual cómo se
- *    construya el escalón: sale igual uniendo dos cilindros que revolucionando un contorno
- *    de una pieza. No es, por tanto, la costura de una booleana: es la arista viva
- *    entrante, que es justo el caso que peor lleva el dual contouring —el vértice de la
- *    celda quiere colocarse fuera de ella, se le recorta a su celda, y los cuadriláteros
- *    que salen pueden cruzarse—.
+ * Partir por la **diagonal más corta** lo arregla, y lo eligen igual los dos vecinos porque
+ * depende solo de la geometría de la cara.
  *
- * El certificado hace lo que debe: se niega a escribir. El síntoma es una exportación que
- * no sale, no una pieza rota.
+ * Queda un defecto distinto, y aquí también está acotado: una revolución cuyo contorno
+ * toca el eje deja astillas en el eje.
  */
 class ContorneadoEnAristasVivasTest {
 
@@ -60,11 +62,13 @@ class ContorneadoEnAristasVivasTest {
     }
 
     @Test
-    fun `un escalon concavo se cruza a algunas resoluciones y a otras no`() {
-        // Esta prueba documenta un defecto, no una garantía: cuando alguien arregle el
-        // contorneado, fallará. Cuando falle, lo que hay que hacer es borrarla y quitar el
-        // límite del README, no relajarla.
-        val union = Union(
+    fun `un escalon concavo no se cruza a ninguna resolucion`() {
+        // Este era el defecto que bloqueaba el cupón de calibración: dos cuadriláteros
+        // vecinos, cada uno partido por la diagonal que se aleja de la arista que
+        // comparten, plegándose el uno contra el otro. En una superficie suave no se nota
+        // porque las dos diagonales se parecen; en una arista viva entrante los vértices
+        // se van a esquinas opuestas de sus celdas y la diferencia es toda la cara.
+        val escalon = Union(
             Cilindro(8f, 1.6f, 0f),
             Transformado(
                 Cilindro(4f, 14f, 0f),
@@ -72,6 +76,22 @@ class ContorneadoEnAristasVivasTest {
             ),
             0f,
         )
+        for (r in resoluciones) {
+            assertEquals(0, cruces(escalon, r), "el escalón se cruza a $r mm")
+        }
+    }
+
+    @Test
+    fun `una revolucion cuyo contorno toca el eje deja astillas en el eje`() {
+        // Defecto **distinto** del anterior y todavía sin arreglar. Cuando el contorno
+        // llega a x = 0 el sólido se cierra sobre el eje, y ahí el campo no tiene una
+        // normal definida: las celdas del eje colocan sus vértices prácticamente en el
+        // mismo punto —se han medido separaciones de 4·10⁻⁷ mm— y salen astillas que se
+        // cruzan entre sí. No tiene que ver con la arista viva: el mismo escalón
+        // construido con una unión sale limpio a todas las resoluciones.
+        //
+        // Cuando alguien lo arregle, esta prueba fallará. Entonces hay que borrarla y
+        // quitar el límite del README, no relajarla.
         val revolucion = Revolucion(
             Perfil2D.poligono(
                 listOf(
@@ -81,18 +101,42 @@ class ContorneadoEnAristasVivasTest {
             ),
             0f,
         )
+        val fallan = resoluciones.filter { cruces(revolucion, it) > 0 }
+        assertTrue(
+            fallan.isNotEmpty(),
+            "la revolución sobre el eje ya no se cruza: arreglado, borra esta prueba",
+        )
+        assertTrue(
+            fallan.size < resoluciones.size,
+            "ahora se cruza a todas las resoluciones; antes solo a algunas",
+        )
+    }
 
-        for ((nombre, nodo) in mapOf("unión" to union, "revolución" to revolucion)) {
-            val fallan = resoluciones.filter { cruces(nodo, it) > 0 }
-            assertTrue(
-                fallan.isNotEmpty(),
-                "el escalón por $nombre ya no se cruza a ninguna resolución: el defecto está " +
-                    "arreglado, borra esta prueba y el límite del README",
-            )
-            assertTrue(
-                fallan.size < resoluciones.size,
-                "el escalón por $nombre se cruza a todas las resoluciones; antes no",
-            )
+    @Test
+    fun `una placa con un taladro no se cruza a ninguna resolucion`() {
+        val placa = Diferencia(Caja(Vec3(30f, 1.5f, 6f), 0f), Cilindro(4.2f, 8f, 0f), 0f)
+        for (r in resoluciones) {
+            assertEquals(0, cruces(placa, r), "la placa taladrada se cruza a $r mm")
+        }
+    }
+
+    @Test
+    fun `la malla sigue siendo cerrada y bien orientada en una arista viva`() {
+        // Partir por la otra diagonal cambia los triángulos, así que hay que comprobar que
+        // no cambia lo que la malla es: un sólido estanco con las normales hacia fuera.
+        val escalon = Union(
+            Cilindro(8f, 1.6f, 0f),
+            Transformado(
+                Cilindro(4f, 14f, 0f),
+                Transform.IDENTITY.copy(translation = Vec3(0f, 7f, 0f)),
+            ),
+            0f,
+        )
+        for (r in resoluciones) {
+            val topologia = ContorneadoDual(escalon, r).generar().revisarTopologia()
+            assertTrue(topologia.esCerrada, "quedan agujeros a $r mm: $topologia")
+            assertTrue(topologia.estaBienOrientada, "hay caras del revés a $r mm: $topologia")
+            assertEquals(0, topologia.triangulosDegenerados, "degenerados a $r mm")
         }
     }
 }

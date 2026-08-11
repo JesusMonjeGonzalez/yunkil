@@ -84,7 +84,7 @@ class ContorneadoDual(
             // --- caras
             emitirCaras(
                 muestrasZ, muestrasZ1, celdasPrevias, celdasActuales,
-                nx, ny, z, triangulos,
+                nx, ny, z, vertices, triangulos,
             )
 
             // Rotar planos: lo que era z+1 pasa a ser z, y el buffer viejo se reutiliza.
@@ -245,6 +245,7 @@ class ContorneadoDual(
         nx: Int,
         ny: Int,
         z: Int,
+        vertices: ArrayList<Float>,
         salida: ArrayList<Int>,
     ) {
         fun celda(plano: IntArray, x: Int, y: Int): Int =
@@ -263,7 +264,7 @@ class ContorneadoDual(
                     val b = celda(celdasPrevias, x, y)
                     val c = celda(celdasActuales, x, y)
                     val d = celda(celdasActuales, x, y - 1)
-                    anadirCuadrilatero(salida, a, b, c, d, d0 < 0f)
+                    anadirCuadrilatero(vertices, salida, a, b, c, d, d0 < 0f)
                 }
             }
             for (y in 0 until ny) {
@@ -275,7 +276,7 @@ class ContorneadoDual(
                     val b = celda(celdasActuales, x - 1, y)
                     val c = celda(celdasActuales, x, y)
                     val d = celda(celdasPrevias, x, y)
-                    anadirCuadrilatero(salida, a, b, c, d, d0 < 0f)
+                    anadirCuadrilatero(vertices, salida, a, b, c, d, d0 < 0f)
                 }
             }
         }
@@ -290,24 +291,63 @@ class ContorneadoDual(
                 val b = celda(celdasActuales, x, y - 1)
                 val c = celda(celdasActuales, x, y)
                 val d = celda(celdasActuales, x - 1, y)
-                anadirCuadrilatero(salida, a, b, c, d, d0 < 0f)
+                anadirCuadrilatero(vertices, salida, a, b, c, d, d0 < 0f)
             }
         }
     }
 
+    /**
+     * Parte el cuadrilátero en dos triángulos **por su diagonal más corta**.
+     *
+     * Los cuatro vértices de una cara dual son los de cuatro celdas distintas y casi nunca
+     * son coplanares, así que elegir diagonal es elegir qué superficie se dibuja. Partir
+     * siempre por la misma —a–c— no se nota mientras la superficie es suave, porque las dos
+     * opciones se parecen. En una **arista viva entrante** sí se nota: los vértices se van a
+     * esquinas opuestas de sus celdas, y dos cuadriláteros vecinos partidos cada uno por la
+     * diagonal que se aleja de la arista que comparten acaban plegándose el uno contra el
+     * otro. Esas dos mitades no comparten ningún vértice, así que el certificado las veía
+     * cruzarse y se negaba a escribir el archivo.
+     *
+     * La diagonal más corta es la que menos se aparta del plano medio de los cuatro puntos,
+     * y la eligen igual los dos vecinos porque depende solo de la geometría de la cara, no
+     * del orden en que se recorra la rejilla. Es la regla estándar del dual contouring y
+     * cuesta dos restas.
+     */
     private fun anadirCuadrilatero(
+        vertices: ArrayList<Float>,
         salida: ArrayList<Int>,
         a: Int, b: Int, c: Int, d: Int,
         haciaDelante: Boolean,
     ) {
         if (a < 0 || b < 0 || c < 0 || d < 0) return
+
+        val porBD = distanciaAlCuadrado(vertices, b, d) < distanciaAlCuadrado(vertices, a, c)
         if (haciaDelante) {
-            salida.add(a); salida.add(b); salida.add(c)
-            salida.add(a); salida.add(c); salida.add(d)
+            // El cuadrilátero recorrido a → b → c → d.
+            if (porBD) {
+                salida.add(b); salida.add(c); salida.add(d)
+                salida.add(b); salida.add(d); salida.add(a)
+            } else {
+                salida.add(a); salida.add(b); salida.add(c)
+                salida.add(a); salida.add(c); salida.add(d)
+            }
         } else {
-            salida.add(a); salida.add(c); salida.add(b)
-            salida.add(a); salida.add(d); salida.add(c)
+            // El mismo, recorrido al revés: a → d → c → b.
+            if (porBD) {
+                salida.add(d); salida.add(c); salida.add(b)
+                salida.add(d); salida.add(b); salida.add(a)
+            } else {
+                salida.add(a); salida.add(d); salida.add(c)
+                salida.add(a); salida.add(c); salida.add(b)
+            }
         }
+    }
+
+    private fun distanciaAlCuadrado(vertices: ArrayList<Float>, i: Int, j: Int): Float {
+        val dx = vertices[i * 3] - vertices[j * 3]
+        val dy = vertices[i * 3 + 1] - vertices[j * 3 + 1]
+        val dz = vertices[i * 3 + 2] - vertices[j * 3 + 2]
+        return dx * dx + dy * dy + dz * dz
     }
 
     private companion object {

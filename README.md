@@ -154,7 +154,7 @@ verification gates.
 
 - Advanced prototype without sustained external print validation.
 - macOS/Apple Silicon application only; no finished iPad application.
-- Concave sharp edges can self-intersect at some contouring resolutions. Export correctly refuses them, but this blocks reliable end-to-end calibration-coupon delivery.
+- A revolution whose profile reaches the axis leaves slivers on that axis, which self-intersect at some contouring resolutions. Export correctly refuses them.
 - Calibration generation and profile derivation exist, but editable calibrated profiles are not persisted yet.
 - Imported-mesh baking can block the main thread.
 - The macOS UI builds but does not have an automated UI test suite.
@@ -162,7 +162,7 @@ verification gates.
 
 ## Current Focus
 
-1. Fix dual-contour self-intersections at concave sharp edges.
+1. Fix dual-contour slivers where a revolution profile meets its axis.
 2. Add application-level tests and move expensive mesh work off the main thread.
 3. Complete persistent machine calibration and real-print validation.
 

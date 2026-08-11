@@ -9,6 +9,9 @@ import yunkil.fabricacion.OrigenDelPerfil
 import yunkil.fabricacion.PerfilFabricacion
 import yunkil.fabricacion.Regla
 import yunkil.fabricacion.Severidad
+import yunkil.malla.ContorneadoDual
+import yunkil.malla.Exportador
+import yunkil.malla.resolucionSugerida
 import yunkil.ia.cotasEnMundoDe
 import kotlin.math.abs
 import kotlin.test.Test
@@ -102,17 +105,26 @@ class CuponDeCalibracionTest {
     fun `el cupon pasa el examen del perfil que viene a calibrar`() {
         // Es la prueba que de verdad importa: una probeta que el propio analizador
         // rechazaría mediría los defectos de la probeta, no los de la máquina.
-        //
-        // Se exceptúa la regla de la malla, y con motivo escrito: el cupón lleva un
-        // escalón cóncavo —el vástago sobre su pie— y ahí el contorneado se cruza consigo
-        // mismo a unas resoluciones sí y a otras no. Es un defecto del contorneado, no del
-        // cupón: sale igual construyendo el escalón de dos maneras distintas. Ver
-        // [ContorneadoEnAristasVivasTest]. Mientras siga, el cupón no se puede entregar.
         val nodo = assertNotNull(CuponDeCalibracion.documento(perfil).compilar())
         val informe = AnalizadorFdm(nodo, perfil, resolucion = 0.4f).analizar()
-        val graves = informe.hallazgos
-            .filter { it.severidad == Severidad.FALLARA && it.regla != Regla.MALLA_EXPORTABLE }
+        val graves = informe.hallazgos.filter { it.severidad == Severidad.FALLARA }
         assertTrue(graves.isEmpty(), "el cupón no es imprimible: ${graves.map { it.titulo }}")
+    }
+
+    @Test
+    fun `el cupon se entrega apto a la resolucion que la aplicacion sugiere`() {
+        // Un cupón que no se puede exportar no calibra nada. Estuvo así hasta que se
+        // arregló la diagonal del contorneado: su escalón —el vástago sobre el pie— hacía
+        // que la malla se cruzara consigo misma y el certificado se negaba a escribir.
+        val nodo = assertNotNull(CuponDeCalibracion.documento(perfil).compilar())
+        val sugerida = resolucionSugerida(nodo)
+        for (r in listOf(sugerida, 0.6f, 0.5f, 0.4f, 0.3f)) {
+            val certificado = Exportador(nodo).examinar(ContorneadoDual(nodo, r).generar(), r, 0)
+            assertTrue(
+                certificado.apto,
+                "a $r mm el cupón no se entrega:\n${certificado.resumen()}",
+            )
+        }
     }
 
     @Test
