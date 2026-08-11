@@ -83,7 +83,7 @@ flowchart TD
 ```text
 core/       Kotlin Multiplatform geometry, document, analysis and export
 apps/mac/   native SwiftUI application and Metal viewport
-tools/      CPU/Metal parity, proposal-preview, camera-ray and gizmo harnesses
+tools/      harnesses: CPU/Metal parity, proposal preview, camera rays, gizmo, app state
 scripts/    build, install and verification entry points
 docs/       detailed design, limits and implementation notes
 ```
@@ -167,7 +167,8 @@ is the flagship path — an arbitrary mesh in, a verified one out.
 ```
 
 The full local harness covers the Kotlin core, CPU/Metal geometry parity,
-proposal-preview rendering, camera rays and application compilation. GitHub CI
+proposal-preview rendering, camera rays, gizmo arithmetic, the application state
+layer driven without a window, and the command-line binary. GitHub CI
 runs the portable JVM core suite; Metal and app behavior remain macOS-local
 verification gates.
 
@@ -176,14 +177,14 @@ verification gates.
 - Advanced prototype without sustained external print validation.
 - macOS/Apple Silicon application only; no finished iPad application.
 - Calibration generation and profile derivation exist, but editable calibrated profiles are not persisted yet.
-- The macOS UI builds but does not have an automated UI test suite.
+- The app harness drives the state layer, not the SwiftUI view tree: layout and rendered controls have no automated coverage.
 - No signed, notarized public release.
 
 ## Current Focus
 
-1. Add application-level tests.
-2. Complete persistent machine calibration and real-print validation.
-3. Sign and notarize a public release.
+1. Complete persistent machine calibration and real-print validation.
+2. Sign and notarize a public release.
+3. Bring the fit system to an iPad application.
 
 ## Deep Technical Documentation
 

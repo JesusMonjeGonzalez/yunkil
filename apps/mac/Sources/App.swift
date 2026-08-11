@@ -3201,7 +3201,12 @@ private extension Collection {
     subscript(safe index: Index) -> Element? { indices.contains(index) ? self[index] : nil }
 }
 
+// El arnés de `tools/estado` compila estos mismos archivos con su propio `main.swift`, y
+// dos puntos de entrada no se pueden enlazar juntos. Es la única concesión que el código de
+// la aplicación le hace a sus pruebas, y sale barata: una bandera de compilación.
+#if !PRUEBAS
 @main
+#endif
 struct YunkilApp: App {
 
     /// El estado vive en la escena para que los menús puedan invocarlo.

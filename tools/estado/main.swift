@@ -1,0 +1,205 @@
+// Arnés de la aplicación: conduce `EstadoDeLaApp` como lo haría un usuario.
+//
+// Hasta aquí lo comprobado era el núcleo —donde vive toda la geometría— y la aritmética de
+// cámara de los arneses de paridad, rayo y gizmo. En medio quedaba la capa que decide *qué*
+// se le pide al núcleo y *cuándo*: qué se selecciona, qué gesto abre un punto de deshacer,
+// cuándo se ofrece un asa y cuándo no. Son unas dos mil líneas de Swift y no tenían ni una
+// prueba, así que un cambio de refactor podía dejar el gizmo mudo o el deshacer partido en
+// veinte pasos sin que nada se pusiera rojo.
+//
+// No se abre ventana: `EstadoDeLaApp` no la necesita para existir. Sin renderizador, la
+// cámara no está, así que aquí se comprueba todo lo que no depende de píxeles —que es donde
+// están las reglas— y los píxeles siguen siendo cosa de los otros arneses.
+//
+//     swiftc -O -D PRUEBAS tools/estado/main.swift apps/mac/Sources/*.swift \
+//         -F <frameworks> -framework YunkilCore -o build/estado-arnes
+//     ./build/estado-arnes
+
+import Foundation
+import YunkilCore
+import simd
+
+var fallos = 0
+
+func comprobar(_ condicion: Bool, _ que: String) {
+    if condicion { print("  ok  \(que)") } else { print("FALLO  \(que)"); fallos += 1 }
+}
+
+func casi(_ a: Float, _ b: Float, _ tolerancia: Float = 1e-3) -> Bool { abs(a - b) <= tolerancia }
+
+@MainActor
+func conUnaCaja() -> (EstadoDeLaApp, String) {
+    let estado = EstadoDeLaApp()
+    estado.anadir("CAJA")
+    return (estado, estado.seleccion)
+}
+
+@MainActor
+func arnes() {
+
+    // ------------------------------------------------------------ selección y árbol
+
+    print("— el árbol y la selección —")
+    do {
+        // La aplicación arranca con un documento de ejemplo, así que todo se cuenta
+        // relativo: fijar el número de filas de partida sería fijar el ejemplo.
+        let estado = EstadoDeLaApp()
+        let departida = estado.filas.count
+        estado.anadir("CAJA")
+
+        comprobar(!estado.seleccion.isEmpty, "añadir deja la pieza seleccionada")
+        comprobar(estado.filas.count == departida + 1, "y en el árbol (\(estado.filas.count) filas)")
+        comprobar(estado.tipoSeleccionado == "CAJA", "el inspector sabe qué tipo es")
+
+        estado.duplicar()
+        comprobar(estado.filas.count == departida + 2, "duplicar añade una hermana")
+        estado.eliminar()
+        comprobar(estado.filas.count == departida + 1, "y eliminar la quita")
+    }
+
+    // ------------------------------------------------------------ el gizmo
+
+    print("\n— cuándo sale el gizmo —")
+    do {
+        let estado = EstadoDeLaApp()
+        estado.seleccionar(estado.raizId)
+        comprobar(estado.centroDelGizmo == nil, "con la raíz seleccionada no hay gizmo")
+
+        estado.anadir("CAJA")
+        comprobar(estado.centroDelGizmo != nil, "con una pieza seleccionada sí")
+
+        estado.seleccionar(estado.raizId)
+        comprobar(estado.centroDelGizmo == nil, "volver a la raíz lo quita: mover el documento no significa nada")
+    }
+
+    do {
+        let (estado, _) = conUnaCaja()
+        estado.modoBrochaOrganica = "ALISAR"
+        comprobar(
+            estado.centroDelGizmo == nil,
+            "con una brocha activa el gizmo se aparta: el clic es del pincel"
+        )
+        estado.modoBrochaOrganica = "NINGUNA"
+        comprobar(estado.centroDelGizmo != nil, "y vuelve al soltar la brocha")
+    }
+
+    print("\n— arrastrar el gizmo —")
+    do {
+        let (estado, _) = conUnaCaja()
+        let centro = estado.centroDelGizmo!
+
+        estado.empezarGestoDelGizmo()
+        for _ in 0..<10 { estado.moverConGizmo(eje: SIMD3<Float>(1, 0, 0), milimetros: 1.2) }
+
+        comprobar(casi(estado.posX, 12), "diez fotogramas de 1,2 mm dejan la pieza en 12 (\(estado.posX))")
+        comprobar(
+            casi(estado.centroDelGizmo!.x - centro.x, 12),
+            "y el gizmo se ha ido con ella"
+        )
+        comprobar(casi(estado.posY, 0) && casi(estado.posZ, 0), "sin arrastrarla en los otros dos ejes")
+
+        // Lo que de verdad decide si el gesto se siente bien: un arrastre es **un** ⌘Z.
+        estado.deshacer()
+        comprobar(casi(estado.posX, 0), "un solo deshacer devuelve el arrastre entero (\(estado.posX))")
+        estado.rehacer()
+        comprobar(casi(estado.posX, 12), "y rehacer lo trae de vuelta")
+    }
+
+    do {
+        let (estado, _) = conUnaCaja()
+        estado.empezarGestoDelGizmo()
+        estado.moverConGizmo(eje: SIMD3<Float>(1, 0, 0), milimetros: 40)
+        let centro = estado.centroDelGizmo!
+
+        estado.empezarGestoDelGizmo()
+        estado.girarConGizmo(eje: SIMD3<Float>(0, 1, 0), grados: 90)
+
+        comprobar(casi(estado.giroY, 90, 0.1), "girar 90° escribe el giro en el inspector (\(estado.giroY))")
+        let despues = estado.centroDelGizmo!
+        comprobar(
+            casi(despues.x, centro.x, 0.05) && casi(despues.z, centro.z, 0.05),
+            "y la pieza gira sobre su sitio, no describiendo un arco (\(centro) → \(despues))"
+        )
+    }
+
+    do {
+        // Una dirección que no apunta a ninguna parte no puede mover nada. Llega del
+        // gizmo solo si algo va mal, y lo que no puede hacer es dejar la pieza en NaN.
+        let (estado, _) = conUnaCaja()
+        estado.empezarGestoDelGizmo()
+        estado.moverConGizmo(eje: SIMD3<Float>(0, 0, 0), milimetros: 10)
+        comprobar(casi(estado.posX, 0) && casi(estado.posY, 0) && casi(estado.posZ, 0), "un eje nulo no mueve la pieza")
+        comprobar(estado.aviso != nil, "y se dice por qué")
+    }
+
+    // ------------------------------------------------------------ el inspector
+
+    print("\n— el inspector y el documento no discrepan —")
+    do {
+        let (estado, caja) = conUnaCaja()
+        estado.posX = 7
+        estado.posY = -3
+        estado.giroZ = 45
+        estado.aplicarTransform()
+
+        // Releer del documento tiene que devolver lo escrito: si el inspector y el
+        // documento se separan, el usuario edita una copia que no existe.
+        estado.seleccionar(estado.raizId)
+        estado.seleccionar(caja)
+        comprobar(casi(estado.posX, 7) && casi(estado.posY, -3), "la posición vuelve del documento")
+        comprobar(casi(estado.giroZ, 45), "y el giro también")
+    }
+
+    do {
+        let (estado, _) = conUnaCaja()
+        estado.fijarParametro("anchura", 62)
+        comprobar(
+            estado.parametros.first { $0.clave == "anchura" }.map { casi($0.valor, 62) } ?? false,
+            "cambiar una cota se ve en el inspector"
+        )
+        comprobar(!estado.recompiloElUltimoCambio, "y no recompila el shader: es un buffer de uniforms")
+    }
+
+    // ------------------------------------------------------------ importar
+
+    print("\n— traer geometría de fuera —")
+    do {
+        let estado = EstadoDeLaApp()
+        let departida = estado.filas.count
+        let basura = NSTemporaryDirectory() + "yunkil-arnes-no-es-un-stl.stl"
+        try? "esto no es un STL".write(toFile: basura, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: basura) }
+
+        estado.importarMallaDesde(ruta: basura)
+        comprobar(estado.importandoMalla, "hornear arranca en otro hilo y la ventana sigue viva")
+
+        esperarA({ !estado.importandoMalla }, "el horneado termina")
+        comprobar(estado.filas.count == departida, "un archivo que no es un STL no mete pieza en el árbol")
+        comprobar((estado.aviso ?? "").contains("STL"), "y el motivo lo dice: \(estado.aviso ?? "sin aviso")")
+    }
+
+    print("")
+    if fallos == 0 {
+        print("Estado de la aplicación: todo correcto.")
+        exit(0)
+    } else {
+        print("Estado de la aplicación: \(fallos) comprobaciones fallaron")
+        exit(1)
+    }
+}
+
+/// Espera a que se cumpla algo que termina en el hilo principal, moviendo el `RunLoop`.
+///
+/// Hace falta porque lo que se está comprobando es justo que el trabajo caro **no** ocurre
+/// aquí: la tarea de horneado vuelve por `MainActor.run`, y sin nadie que atienda el hilo
+/// principal esa vuelta no llegaría nunca.
+@MainActor
+func esperarA(_ condicion: () -> Bool, _ que: String, segundos: TimeInterval = 20) {
+    let limite = Date().addingTimeInterval(segundos)
+    while !condicion(), Date() < limite {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    }
+    comprobar(condicion(), que)
+}
+
+MainActor.assumeIsolated { arnes() }

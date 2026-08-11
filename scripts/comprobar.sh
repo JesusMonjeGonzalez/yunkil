@@ -15,7 +15,9 @@
 #   5. El gizmo: proyectar es la vuelta exacta del rayo, y arrastrar mueve y gira hacia
 #      donde se arrastra. Otro sitio donde un signo no da error, da un gesto al revés.
 #   6. Que la aplicación de escritorio compile y enlace contra el núcleo real.
-#   7. Que la orden de terminal enlace y arranque: es el mismo núcleo sin ventana, y se
+#   7. El estado de la aplicación conducido como lo conduce un usuario: la capa que decide
+#      qué se le pide al núcleo y cuándo, que es la que no tenía nada que la mirara.
+#   8. Que la orden de terminal enlace y arranque: es el mismo núcleo sin ventana, y se
 #      rompe en silencio si nadie la construye.
 #
 #     ./scripts/comprobar.sh          # todo
@@ -58,6 +60,16 @@ swiftc -O tools/gizmo/main.swift apps/mac/Sources/Camara.swift apps/mac/Sources/
 paso "Aplicación de escritorio"
 ./scripts/construir-mac.sh debug >/dev/null
 echo "Yunkil.app construida"
+
+paso "Estado de la aplicación"
+# Conduce `EstadoDeLaApp` sin abrir ventana: qué se selecciona, qué gesto abre un punto de
+# deshacer, cuándo se ofrece un asa. Va después de construir la app porque reutiliza su
+# framework, y sin optimizar porque compilar toda la interfaz con -O no cambia lo que mide.
+swiftc -D PRUEBAS -target arm64-apple-macos14.0 \
+    tools/estado/main.swift apps/mac/Sources/*.swift \
+    -F core/build/bin/macosArm64/debugFramework -framework YunkilCore \
+    -o build/estado-arnes
+./build/estado-arnes || fallos=$((fallos + 1))
 
 paso "Orden de terminal"
 # Enlaza el ejecutable nativo y lo hace hablar. Comparte la compilación con el framework
