@@ -1670,6 +1670,46 @@ class Editor(inicial: Documento = Documento.vacio()) {
         }
     }
 
+    /**
+     * Agranda o encoge la pieza **alrededor del centro de su caja**, multiplicando.
+     *
+     * Por el mismo motivo que el giro pivota ahí: escalar respecto del origen local mandaría
+     * de viaje a cualquier pieza descentrada, y quien arrastra un asa de escala espera que la
+     * pieza crezca donde está. Se multiplica y no se fija un valor porque el gesto es
+     * relativo: cien fotogramas de un arrastre son cien factores pequeños encadenados.
+     *
+     * La escala es uniforme en todo el sistema —una escala por ejes deformaría el campo y las
+     * distancias dejarían de ser distancias, con lo que el analizador de fabricación mediría
+     * mentiras—, así que esto es un solo número y no tres.
+     */
+    fun escalarEnElMundo(id: String, factor: Float): Boolean {
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        if (!factor.isFinite() || factor <= 0f) return rechazar("El factor de escala debe ser positivo")
+        val nueva = (pieza.transform.scale * factor).coerceIn(0.01f, 1000f)
+        if (nueva == pieza.transform.scale) return false
+
+        val padre = documento.transformDelPadreDe(id) ?: Transform.IDENTITY
+        val pivote = documento.cotasEnMundoDe(id)?.center?.let { padre.worldToLocal(it) }
+        // El factor que de verdad se aplica, después de topar: la traslación tiene que
+        // moverse con él o la pieza se separaría de su propio centro al llegar al límite.
+        val real = nueva / pieza.transform.scale
+
+        return aplicar(registrarEnHistorial = false) { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(id) {
+                    val t = it.transform
+                    it.copy(
+                        transform = t.copy(
+                            scale = nueva,
+                            translation = if (pivote == null) t.translation
+                            else pivote + (t.translation - pivote) * real,
+                        ),
+                    )
+                },
+            )
+        }
+    }
+
     /** Un vector del mundo, dicho en el marco del padre de una pieza. */
     private fun enElMarcoDelPadre(padre: Transform, v: Vec3): Vec3 =
         applyMatrix(padre.rotation.conjugate().toMatrixRowMajor(), v) / padre.scale

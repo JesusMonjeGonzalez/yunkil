@@ -108,6 +108,63 @@ do {
     comprobar(ejes.count == 2, "y los otros dos sí (\(ejes.count))")
 }
 
+// ---------------------------------------------------------------- escalar
+
+print("\n— el asa de escala —")
+do {
+    let camara = camaraDePrueba()
+    let gizmo = Gizmo(centro: SIMD3<Float>(0, 0, 0), radio: 20)
+    guard let asa = gizmo.asaDeEscala(camara: camara, aspecto: ASPECTO) else {
+        comprobar(false, "el asa de escala se proyecta"); exit(1)
+    }
+    let base = camara.proyectar(SIMD3<Float>(0, 0, 0), aspecto: ASPECTO)!
+    comprobar(asa.y > base.y && asa.x > base.x, "va arriba y a la derecha en la pantalla, no sobre un eje del mundo")
+
+    // Y no se pisa con ninguna punta de flecha, orbite como orbite: dos dianas encima la
+    // una de la otra son una lotería.
+    for grados in stride(from: 0.0, to: 6.28, by: 0.35) {
+        var c = camaraDePrueba()
+        c.azimut = Float(grados)
+        c.elevacion = Float(grados) * 0.2 - 0.6
+        guard let e = gizmo.asaDeEscala(camara: c, aspecto: ASPECTO) else { continue }
+        for eje in gizmo.ejes(camara: c, aspecto: ASPECTO) {
+            let d = simd_length(SIMD2<Float>((e.x - eje.punta.x) * ASPECTO, e.y - eje.punta.y))
+            if d <= Gizmo.toleranciaDeAgarre * 2 {
+                comprobar(false, "el asa de escala se pisa con la flecha \(eje.eje) a \(grados) rad")
+            }
+        }
+    }
+    comprobar(gizmo.agarrar(uv: asa, camara: camara, aspecto: ASPECTO) == .escalar, "y se agarra")
+
+    // Girando la vista sigue arriba: es lo que la hace encontrable sin buscarla.
+    var otra = camaraDePrueba()
+    otra.azimut = 2.4
+    otra.elevacion = -0.6
+    let movida = gizmo.asaDeEscala(camara: otra, aspecto: ASPECTO)!
+    comprobar(movida.y > otra.proyectar(SIMD3<Float>(0, 0, 0), aspecto: ASPECTO)!.y, "y sigue arriba al orbitar")
+    comprobar(true, "sin pisarse con ninguna flecha en toda la vuelta")
+}
+
+do {
+    let camara = camaraDePrueba()
+    let gizmo = Gizmo(centro: SIMD3<Float>(0, 0, 0), radio: 20)
+    let base = camara.proyectar(SIMD3<Float>(0, 0, 0), aspecto: ASPECTO)!
+
+    // Alejarse del centro agranda; acercarse encoge. Es el único gesto que se entiende
+    // sin que nadie lo explique, y el signo que lo hace inservible si se invierte.
+    let cerca = base + SIMD2<Float>(0.2, 0)
+    let lejos = base + SIMD2<Float>(0.4, 0)
+    let crece = gizmo.factorDeEscala(desde: cerca, hasta: lejos, camara: camara, aspecto: ASPECTO)
+    comprobar(casi(crece, 2), "doblar la distancia dobla la pieza (\(crece))")
+
+    let encoge = gizmo.factorDeEscala(desde: lejos, hasta: cerca, camara: camara, aspecto: ASPECTO)
+    comprobar(casi(encoge, 0.5), "y a la mitad, la mitad (\(encoge))")
+
+    // Pasar por el centro daría un factor cero y la pieza se esfumaría de un tirón.
+    let enElCentro = gizmo.factorDeEscala(desde: lejos, hasta: base, camara: camara, aspecto: ASPECTO)
+    comprobar(enElCentro >= 0.5, "cruzar el centro no hace desaparecer la pieza (\(enElCentro))")
+}
+
 // ---------------------------------------------------------------- mover
 
 print("\n— arrastrar para mover —")
@@ -168,6 +225,50 @@ do {
     let pasadoPi = centro + SIMD2<Float>(-0.3, -0.01)
     let grados = gizmo.grados(eje: .y, desde: casiPi, hasta: pasadoPi, camara: camara, aspecto: ASPECTO)
     comprobar(abs(grados) < 10, "cruzar el ±180 no da media vuelta (\(grados)°)")
+}
+
+// ---------------------------------------------------------------- ajustar
+
+print("\n— ajustar el arrastre con ⇧ —")
+do {
+    // Sin ajuste se entrega tal cual, fotograma a fotograma.
+    var libre = AcumuladorDeGesto()
+    var total: Float = 0
+    for _ in 0..<10 { total += libre.entregar(0.37, incremento: nil) }
+    comprobar(casi(total, 3.7), "sin ⇧ se entrega todo lo que pide el ratón (\(total))")
+}
+
+do {
+    // Con ajuste, un ratón que entrega décimas tiene que acabar moviendo la pieza: si se
+    // redondeara cada fotograma por separado, cada décima daría cero y no se movería nunca.
+    var ajustado = AcumuladorDeGesto()
+    var total: Float = 0
+    var entregas = 0
+    for _ in 0..<30 {
+        let d = ajustado.entregar(0.1, incremento: 1)
+        if d != 0 { entregas += 1 }
+        total += d
+    }
+    comprobar(casi(total, 3), "treinta décimas con ⇧ son tres milímetros exactos (\(total))")
+    comprobar(entregas == 3, "entregados en tres escalones y no en treinta (\(entregas))")
+}
+
+do {
+    // Y volver sobre lo andado deshace escalones, no los suma.
+    var ida = AcumuladorDeGesto()
+    var total: Float = 0
+    for _ in 0..<20 { total += ida.entregar(0.5, incremento: 1) }
+    for _ in 0..<10 { total += ida.entregar(-0.5, incremento: 1) }
+    comprobar(casi(total, 5), "diez arriba y cinco abajo dejan cinco (\(total))")
+    comprobar(casi(ida.pedido, 5), "y lo pedido y lo entregado coinciden al cruzar un escalón")
+}
+
+do {
+    // Un ángulo también, con su escalón de quince grados.
+    var giro = AcumuladorDeGesto()
+    var total: Float = 0
+    for _ in 0..<8 { total += giro.entregar(4, incremento: 15) }
+    comprobar(casi(total, 30), "treinta y dos grados pedidos se quedan en treinta (\(total))")
 }
 
 print("")

@@ -93,7 +93,7 @@ docs/       detailed design, limits and implementation notes
 | Area | Current implementation |
 |---|---|
 | Technical modeling | Primitives, profiles, extrusion, revolution, sweep, booleans, fillet, chamfer, shell, offset, symmetry and patterns |
-| Direct interaction | CPU ray picking, face manipulation, sectioning, orthographic views and transactional undo/redo |
+| Direct interaction | CPU ray picking, face manipulation, a move/rotate/scale gizmo with 1 mm and 15° snapping, sectioning, orthographic views and transactional undo/redo |
 | Fit system | Provenance-aware measurements, governed dimensions, fit classes and final-geometry verification |
 | Organic modeling | Semantic SDF figures, variable-radius curves, additive/subtractive and field-deformation brushes, masks and symmetry |
 | Manufacturing | FDM profiles, wall/support/overhang analysis, orientation search, fit reports and a printed calibration coupon that stores a per-machine clearance |

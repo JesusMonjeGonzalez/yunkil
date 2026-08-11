@@ -127,6 +127,47 @@ class GizmoEnElMundoTest {
     }
 
     @Test
+    fun `escalar deja el centro donde estaba y multiplica la caja`() {
+        // Mismo motivo que el giro: escalar respecto del origen local mandaría de viaje a
+        // cualquier pieza descentrada, y quien arrastra el asa espera que crezca donde está.
+        val (editor, caja) = conUnaCaja()
+        editor.moverEnElMundo(caja, 1f, 0f, 0f, 40f)
+        val antes = centro(editor, caja)
+        val ancho = editor.cotaMaxima[0] - editor.cotaMinima[0]
+
+        editor.escalarEnElMundo(caja, 2f)
+
+        val despues = centro(editor, caja)
+        for (i in 0..2) {
+            assertTrue(abs(despues[i] - antes[i]) < 1e-2f, "el centro se ha ido: $antes → $despues")
+        }
+        assertEquals(ancho * 2f, editor.cotaMaxima[0] - editor.cotaMinima[0], 1e-2f)
+    }
+
+    @Test
+    fun `escalar encadena factores, que es como llega un arrastre`() {
+        val (editor, caja) = conUnaCaja()
+        val ancho = editor.cotaMaxima[0] - editor.cotaMinima[0]
+
+        repeat(10) { editor.escalarEnElMundo(caja, 1.1f) }
+
+        // 1,1 elevado a diez son 2,5937…
+        assertEquals(ancho * 2.5937f, editor.cotaMaxima[0] - editor.cotaMinima[0], 0.05f)
+    }
+
+    @Test
+    fun `un factor de escala imposible se rechaza`() {
+        val (editor, caja) = conUnaCaja()
+        val ancho = editor.cotaMaxima[0] - editor.cotaMinima[0]
+
+        editor.escalarEnElMundo(caja, 0f)
+        editor.escalarEnElMundo(caja, -2f)
+
+        assertEquals(ancho, editor.cotaMaxima[0] - editor.cotaMinima[0], 1e-3f)
+        assertNotNull(editor.ultimoError)
+    }
+
+    @Test
     fun `un eje sin direccion se rechaza en vez de dejar la pieza en un sitio raro`() {
         val (editor, caja) = conUnaCaja()
         val antes = centro(editor, caja)

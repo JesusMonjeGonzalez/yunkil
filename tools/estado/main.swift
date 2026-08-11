@@ -136,6 +136,28 @@ func arnes() {
     }
 
     do {
+        // Con el documento vacío y una sola caja: medir las cotas del documento entero
+        // mediría la esfera del ejemplo, que es más ancha y no se está escalando.
+        let estado = piezaPequena()
+        let ancho = { estado.editor.cotaMaxima[0].floatValue - estado.editor.cotaMinima[0].floatValue }
+        let departida = ancho()
+        let centro = estado.centroDelGizmo!
+
+        estado.empezarGestoDelGizmo()
+        for _ in 0..<7 { estado.escalarConGizmo(factor: 1.1) }
+
+        comprobar(ancho() > departida * 1.9, "escalar agranda la pieza (\(departida) → \(ancho()))")
+        comprobar(
+            casi(estado.centroDelGizmo!.x, centro.x, 0.05) && casi(estado.centroDelGizmo!.y, centro.y, 0.05),
+            "y la agranda donde está, no la manda de viaje"
+        )
+        comprobar(estado.escala > 1.9, "el inspector enseña la escala nueva (\(estado.escala))")
+
+        estado.deshacer()
+        comprobar(casi(ancho(), departida, 0.01), "y todo el arrastre se deshace de una vez")
+    }
+
+    do {
         // Una dirección que no apunta a ninguna parte no puede mover nada. Llega del
         // gizmo solo si algo va mal, y lo que no puede hacer es dejar la pieza en NaN.
         let (estado, _) = conUnaCaja()

@@ -49,6 +49,10 @@ struct Gizmo {
     enum Asa: Equatable {
         case mover(Eje)
         case girar(Eje)
+        /// Escalar es **uno solo** y no tres: la escala del sistema es uniforme a propósito
+        /// —una por ejes deformaría el campo y las distancias dejarían de ser distancias—,
+        /// así que ofrecer un asa por eje prometería algo que el documento no sabe guardar.
+        case escalar
     }
 
     struct EjeEnPantalla {
@@ -80,6 +84,10 @@ struct Gizmo {
 
     /// Y menos alineado que esto no ofrece anillo: coseno 0,35 son 70°.
     static let cosenoMinimoDeAnillo: Float = 0.35
+
+    /// A qué altura de la pantalla va el asa de escala, en veces el radio. Por encima del
+    /// anillo para que no se pisen las dianas.
+    static let alturaDeLaEscala: Float = 1.62
 
     /// Cuántos tramos tiene el anillo trazado. Con 96 el error de dibujo es medio píxel a
     /// tamaño de pantalla completa, y la distancia se mide contra los segmentos, no contra
@@ -114,6 +122,23 @@ struct Gizmo {
         }
     }
 
+    /// El centro del gizmo proyectado, que es de donde sale todo lo que se dibuja.
+    func centroEnPantalla(camara: CamaraOrbital, aspecto: Float) -> SIMD2<Float>? {
+        camara.proyectar(centro, aspecto: aspecto)
+    }
+
+    /// Dónde se dibuja el asa de escala, o `nil` si el centro no está en pantalla.
+    ///
+    /// Va **arriba y a la derecha en la pantalla**, no sobre un eje del mundo: como el gesto
+    /// que dispara es uniforme y no tiene dirección, atarla a un eje sugeriría que estira por
+    /// él. En la diagonal, además, no se pisa con ninguna flecha por mucho que se orbite, y
+    /// siguiendo la base de la cámara se queda siempre donde se la busca.
+    func asaDeEscala(camara: CamaraOrbital, aspecto: Float) -> SIMD2<Float>? {
+        let base = camara.baseOrtonormal()
+        let sitio = (base.arriba + base.derecha) * (radio * Self.alturaDeLaEscala * 0.707)
+        return camara.proyectar(centro + sitio, aspecto: aspecto)
+    }
+
     // MARK: - Agarrar
 
     /// Qué asa hay bajo el cursor, si hay alguna.
@@ -129,6 +154,12 @@ struct Gizmo {
             let d = distanciaEnPantalla(uv, eje.punta, aspecto: aspecto)
             if d <= Self.toleranciaDeAgarre, d < (mejor?.distancia ?? .infinity) {
                 mejor = (.mover(eje.eje), d)
+            }
+        }
+        if let escala = asaDeEscala(camara: camara, aspecto: aspecto) {
+            let d = distanciaEnPantalla(uv, escala, aspecto: aspecto)
+            if d <= Self.toleranciaDeAgarre, d < (mejor?.distancia ?? .infinity) {
+                mejor = (.escalar, d)
             }
         }
         if let mejor { return mejor.asa }
@@ -203,6 +234,27 @@ struct Gizmo {
         return sinSalto * (180 / .pi) * (haciaLaCamara ? 1 : -1)
     }
 
+    /// Cuánto crece o encoge la pieza al arrastrar el asa de escala.
+    ///
+    /// Es la razón entre lo que dista el cursor del centro ahora y lo que distaba antes:
+    /// alejarse agranda y acercarse encoge, que es el único gesto que se entiende sin
+    /// explicación. Se acota por arriba y por abajo porque un fotograma que pasara justo por
+    /// el centro daría un factor cero y la pieza desaparecería de un tirón.
+    ///
+    /// - Returns: el factor de este fotograma, que se **multiplica** al anterior.
+    func factorDeEscala(
+        desde: SIMD2<Float>,
+        hasta: SIMD2<Float>,
+        camara: CamaraOrbital,
+        aspecto: Float
+    ) -> Float {
+        guard let base = camara.proyectar(centro, aspecto: aspecto) else { return 1 }
+        let antes = distanciaEnPantalla(desde, base, aspecto: aspecto)
+        let ahora = distanciaEnPantalla(hasta, base, aspecto: aspecto)
+        guard antes > 1e-4 else { return 1 }
+        return (ahora / antes).clamped(0.5, 2)
+    }
+
     // MARK: - Cuentas
 
     private func direccionDeVista(_ camara: CamaraOrbital) -> SIMD3<Float> {
@@ -254,5 +306,42 @@ struct Gizmo {
         }
         if actual.count > 1 { tramos.append(actual) }
         return tramos
+    }
+}
+
+private extension Float {
+    func clamped(_ minimo: Float, _ maximo: Float) -> Float { min(max(self, minimo), maximo) }
+}
+
+/// Lleva la cuenta de un arrastre para poder ajustarlo por incrementos.
+///
+/// Con ⇧ el gesto avanza de milímetro en milímetro o de quince en quince grados, y eso no
+/// se puede hacer redondeando cada fotograma por separado: un ratón entrega décimas, cada
+/// una redondearía a cero y la pieza no se movería nunca. Hay que acumular lo que se pide y
+/// entregar solo al cruzar cada escalón, guardando el resto.
+///
+/// Vive aquí, y no en la vista que atiende el ratón, porque es aritmética pura y porque
+/// «se queda corto» es un fallo que nadie ve mirando: se ve midiendo.
+struct AcumuladorDeGesto {
+
+    /// Todo lo que ha pedido el ratón desde que se agarró el asa.
+    private(set) var pedido: Float = 0
+    /// Lo que se le ha entregado al documento, que con ⇧ va por escalones.
+    private(set) var entregado: Float = 0
+
+    /// - Parameter incremento: el escalón del ajuste, o `nil` para entregar todo tal cual.
+    /// - Returns: lo que hay que aplicar **ahora**, que puede ser cero.
+    mutating func entregar(_ paso: Float, incremento: Float?) -> Float {
+        guard paso.isFinite else { return 0 }
+        pedido += paso
+        let objetivo: Float
+        if let incremento, incremento > 0 {
+            objetivo = (pedido / incremento).rounded() * incremento
+        } else {
+            objetivo = pedido
+        }
+        let delta = objetivo - entregado
+        entregado = objetivo
+        return delta
     }
 }

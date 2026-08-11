@@ -69,7 +69,12 @@ struct CamaraOrbital {
         distancia = radio / tan(campoDeVision * 0.5) * 1.6
     }
 
-    private func baseOrtonormal() -> (frente: SIMD3<Float>, derecha: SIMD3<Float>, arriba: SIMD3<Float>) {
+    /// La base de la cámara: hacia dónde mira, su derecha y su arriba.
+    ///
+    /// Deja de ser privada porque el gizmo necesita el «arriba de la pantalla» para colocar
+    /// el asa de escala siempre en el mismo sitio de la vista. Rehacer la cuenta allí sería
+    /// tener dos versiones de la misma base y descubrir el día menos pensado que difieren.
+    func baseOrtonormal() -> (frente: SIMD3<Float>, derecha: SIMD3<Float>, arriba: SIMD3<Float>) {
         let ce = cos(elevacion)
         let posicion = objetivo + SIMD3<Float>(
             ce * cos(azimut) * distancia,

@@ -62,8 +62,27 @@ final class VistaMetalInteractiva: MTKView {
     /// Un fotograma de arrastre por un anillo: eje del mundo y grados.
     var alGirarConGizmo: ((SIMD3<Float>, Float) -> Void)?
 
+    /// Un fotograma de arrastre por el asa de escala: cuánto crece o encoge.
+    var alEscalarConGizmo: ((Float) -> Void)?
+
     /// El asa agarrada, mientras dure el arrastre. Con una agarrada no se orbita.
     private var asaDelGizmo: Gizmo.Asa?
+
+    /// El asa que hay debajo del cursor sin haber pulsado.
+    ///
+    /// Sin esto hay que adivinar dónde acaba una diana y empieza la siguiente, y el gizmo
+    /// se siente resbaladizo aunque acierte siempre: lo que falla no es el clic, es no
+    /// saber de antemano qué va a pasar al hacerlo.
+    private(set) var asaResaltada: Gizmo.Asa? {
+        didSet { if asaResaltada != oldValue { capaDelGizmo.needsDisplay = true } }
+    }
+
+    /// La cuenta del arrastre en curso, para poder ajustar por incrementos con ⇧.
+    private var acumulador = AcumuladorDeGesto()
+
+    /// Incrementos del ajuste con ⇧. Un milímetro y quince grados son los de cualquier CAD.
+    private static let pasoDeAjusteEnMm: Float = 1
+    private static let pasoDeAjusteEnGrados: Float = 15
     /// Última posición del cursor en coordenadas de proyección, para el giro: el ángulo
     /// se mide entre dos puntos, no a partir del recorrido del ratón.
     private var ultimoUv = SIMD2<Float>(0, 0)
@@ -158,7 +177,9 @@ final class VistaMetalInteractiva: MTKView {
            let uv = uvDelCursor(evento), let aspecto = aspectoDeLaVista(),
            let asa = gizmo.agarrar(uv: uv, camara: camara, aspecto: aspecto) {
             asaDelGizmo = asa
+            asaResaltada = asa
             ultimoUv = uv
+            acumulador = AcumuladorDeGesto()
             // Un solo punto de deshacer para el gesto entero, como en el resto de arrastres.
             alEmpezarGestoDelGizmo?()
             capaDelGizmo.needsDisplay = true
@@ -293,26 +314,64 @@ final class VistaMetalInteractiva: MTKView {
     /// Un fotograma del arrastre de un asa.
     ///
     /// Mover se cuenta con el delta del dispositivo, que es lo que tiene la precisión;
-    /// girar, con la posición del cursor, porque el ángulo se mide entre dos puntos y no
-    /// se puede acumular a partir de recorridos.
+    /// girar y escalar, con la posición del cursor, porque un ángulo se mide entre dos
+    /// puntos y una razón entre dos distancias, y ninguno de los dos se puede acumular a
+    /// partir de recorridos.
     private func arrastrarElGizmo(_ asa: Gizmo.Asa, _ evento: NSEvent) {
         guard let gizmo = gizmoActual(), let camara = renderizador?.camara,
               let uv = uvDelCursor(evento), let aspecto = aspectoDeLaVista() else { return }
+        let ajustando = evento.modifierFlags.contains(.shift)
 
         switch asa {
         case .mover(let eje):
-            alMoverConGizmo?(eje.direccion, gizmo.avance(
+            let paso = gizmo.avance(
                 eje: eje, camara: camara,
                 deltaX: Float(evento.deltaX), deltaY: Float(evento.deltaY),
                 alturaEnPuntos: Float(bounds.height)
-            ))
+            )
+            let delta = acumulador.entregar(paso, incremento: ajustando ? Self.pasoDeAjusteEnMm : nil)
+            if delta != 0 { alMoverConGizmo?(eje.direccion, delta) }
+
         case .girar(let eje):
-            alGirarConGizmo?(eje.direccion, gizmo.grados(
+            let paso = gizmo.grados(
                 eje: eje, desde: ultimoUv, hasta: uv, camara: camara, aspecto: aspecto
-            ))
+            )
+            let delta = acumulador.entregar(paso, incremento: ajustando ? Self.pasoDeAjusteEnGrados : nil)
+            if delta != 0 { alGirarConGizmo?(eje.direccion, delta) }
+
+        case .escalar:
+            // La escala no se ajusta por incrementos: el gesto es una razón, y «de uno en
+            // uno» no significa nada sobre un factor. Quien quiera una escala exacta la
+            // escribe en el inspector, que para eso está la casilla.
+            let factor = gizmo.factorDeEscala(
+                desde: ultimoUv, hasta: uv, camara: camara, aspecto: aspecto
+            )
+            if factor != 1 { alEscalarConGizmo?(factor) }
         }
         ultimoUv = uv
         capaDelGizmo.needsDisplay = true
+    }
+
+    // MARK: - Resalte
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        ))
+    }
+
+    override func mouseMoved(with evento: NSEvent) {
+        guard asaDelGizmo == nil, let gizmo = gizmoActual(), let camara = renderizador?.camara,
+              let uv = uvDelCursor(evento), let aspecto = aspectoDeLaVista() else { return }
+        asaResaltada = gizmo.agarrar(uv: uv, camara: camara, aspecto: aspecto)
+    }
+
+    override func mouseExited(with evento: NSEvent) {
+        asaResaltada = nil
     }
 
     override func rightMouseDragged(with evento: NSEvent) {
@@ -365,11 +424,14 @@ final class CapaDelGizmo: NSView {
         guard let vista, let gizmo = vista.gizmoActual(), let camara = vista.renderizador?.camara,
               bounds.width > 0, bounds.height > 0 else { return }
         let aspecto = Float(bounds.width / bounds.height)
-        let agarrada = vista.asaAgarrada
+        // Agarrada manda sobre resaltada: mientras se arrastra, el cursor puede pasar por
+        // encima de otra asa y lo que responde sigue siendo la de la mano.
+        let viva = vista.asaAgarrada ?? vista.asaResaltada
+        let arrastrando = vista.asaAgarrada != nil
 
         for anillo in gizmo.anillos(camara: camara, aspecto: aspecto) {
-            let activo = agarrada == .girar(anillo.eje)
-            color(anillo.eje, activo: activo).setStroke()
+            let activo = viva == .girar(anillo.eje)
+            color(anillo.eje, activo: activo, agarrada: arrastrando).setStroke()
             for tramo in anillo.tramos {
                 let trazo = NSBezierPath()
                 trazo.lineWidth = activo ? 2.5 : 1.5
@@ -380,8 +442,8 @@ final class CapaDelGizmo: NSView {
         }
 
         for eje in gizmo.ejes(camara: camara, aspecto: aspecto) {
-            let activo = agarrada == .mover(eje.eje)
-            let tinta = color(eje.eje, activo: activo)
+            let activo = viva == .mover(eje.eje)
+            let tinta = color(eje.eje, activo: activo, agarrada: arrastrando)
             tinta.setStroke()
             tinta.setFill()
 
@@ -400,6 +462,27 @@ final class CapaDelGizmo: NSView {
                 x: centro.x - radio, y: centro.y - radio, width: radio * 2, height: radio * 2
             )).fill()
         }
+
+        // El asa de escala: un cuadrado, para que no se confunda con las tres puntas
+        // redondas. Blanca y no de un color de eje, porque no estira por ninguno.
+        if let escala = gizmo.asaDeEscala(camara: camara, aspecto: aspecto) {
+            let activo = viva == .escalar
+            let lado: CGFloat = activo ? 12 : 9
+            let centro = punto(escala)
+            let base = punto(gizmo.centroEnPantalla(camara: camara, aspecto: aspecto) ?? escala)
+
+            let tallo = NSBezierPath()
+            tallo.lineWidth = 1.5
+            NSColor(white: 0.85, alpha: activo ? 0.9 : 0.45).setStroke()
+            tallo.move(to: base)
+            tallo.line(to: centro)
+            tallo.stroke()
+
+            NSColor(white: activo ? 1.0 : 0.86, alpha: 0.95).setFill()
+            NSBezierPath(roundedRect: NSRect(
+                x: centro.x - lado / 2, y: centro.y - lado / 2, width: lado, height: lado
+            ), xRadius: 2, yRadius: 2).fill()
+        }
     }
 
     /// De coordenadas de proyección a puntos de la vista. La Y no se voltea: la vista no
@@ -412,10 +495,15 @@ final class CapaDelGizmo: NSView {
     }
 
     /// Rojo, verde y azul: es la convención de todas las herramientas 3D y viene aprendida
-    /// de fuera. Desaturados para que convivan con el grafito del visor, y el asa agarrada
-    /// en blanco, que es lo que dice cuál de ellas está respondiendo al ratón.
-    private func color(_ eje: Gizmo.Eje, activo: Bool) -> NSColor {
-        if activo { return NSColor(red: 0.98, green: 0.99, blue: 1.0, alpha: 1) }
+    /// de fuera. Desaturados para que convivan con el grafito del visor.
+    ///
+    /// El asa viva va en blanco. Se distingue **pasar por encima** de tenerla agarrada por
+    /// la opacidad, no por el color: al pasar el ratón el blanco es más tenue, y así el
+    /// resalte anuncia lo que va a pasar sin gritar como si ya estuviera pasando.
+    private func color(_ eje: Gizmo.Eje, activo: Bool, agarrada: Bool) -> NSColor {
+        if activo {
+            return NSColor(red: 0.98, green: 0.99, blue: 1.0, alpha: agarrada ? 1 : 0.82)
+        }
         switch eje {
         case .x: return NSColor(red: 0.91, green: 0.36, blue: 0.38, alpha: 0.92)
         case .y: return NSColor(red: 0.45, green: 0.82, blue: 0.42, alpha: 0.92)
@@ -444,12 +532,14 @@ struct VisorMetal: NSViewRepresentable {
     let alEmpezarGestoDelGizmo: () -> Void
     let alMoverConGizmo: (SIMD3<Float>, Float) -> Void
     let alGirarConGizmo: (SIMD3<Float>, Float) -> Void
+    let alEscalarConGizmo: (Float) -> Void
 
     func makeNSView(context: Context) -> VistaMetalInteractiva {
         let vista = VistaMetalInteractiva()
         vista.alEmpezarGestoDelGizmo = alEmpezarGestoDelGizmo
         vista.alMoverConGizmo = alMoverConGizmo
         vista.alGirarConGizmo = alGirarConGizmo
+        vista.alEscalarConGizmo = alEscalarConGizmo
         vista.alPinchar = alPinchar
         vista.alEmpezarAEmpujar = alEmpezarAEmpujar
         vista.alEmpujar = alEmpujar
@@ -486,6 +576,7 @@ struct VisorMetal: NSViewRepresentable {
         vista.alEmpezarGestoDelGizmo = alEmpezarGestoDelGizmo
         vista.alMoverConGizmo = alMoverConGizmo
         vista.alGirarConGizmo = alGirarConGizmo
+        vista.alEscalarConGizmo = alEscalarConGizmo
         vista.centroDelGizmo = centroDelGizmo
         // Redibujar aunque el centro no haya cambiado: girar la pieza sobre su propio
         // centro no lo mueve, y el gizmo tiene que enterarse igual.
@@ -1026,6 +1117,11 @@ final class EstadoDeLaApp: ObservableObject {
         aplicarGesto(editor.girarEnElMundo(
             id: seleccion, x: eje.x, y: eje.y, z: eje.z, grados: grados
         ))
+    }
+
+    func escalarConGizmo(factor: Float) {
+        guard !seleccion.isEmpty, factor != 1 else { return }
+        aplicarGesto(editor.escalarEnElMundo(id: seleccion, factor: factor))
     }
 
     /// Un fotograma del arrastre del gizmo: el inspector se refresca porque sus casillas
@@ -2350,7 +2446,8 @@ struct VistaPrincipal: View {
                     centroDelGizmo: estado.centroDelGizmo,
                     alEmpezarGestoDelGizmo: { estado.empezarGestoDelGizmo() },
                     alMoverConGizmo: { estado.moverConGizmo(eje: $0, milimetros: $1) },
-                    alGirarConGizmo: { estado.girarConGizmo(eje: $0, grados: $1) }
+                    alGirarConGizmo: { estado.girarConGizmo(eje: $0, grados: $1) },
+                    alEscalarConGizmo: { estado.escalarConGizmo(factor: $0) }
                 )
                 .contextMenu { menuDelViewport }
                 VStack(spacing: 0) {

@@ -40,6 +40,8 @@ Kotlin para iOS, pero no hay todavía una aplicación iPad terminada.
 - Patrón circular en X/Y/Z, hasta 64 copias y ángulo total editable.
 - Taladros, paredes, nervios, encajes, patrones normalizados y perfiles de fabricación.
 - Selección por raymarching CPU, manipulación directa de caras, sección y orientación.
+- Gizmo de mover, girar y escalar sobre el centro de la pieza, con resalte al pasar el
+  ratón y ajuste de 1 mm y 15° manteniendo ⇧.
 - Historial transaccional con deshacer y rehacer.
 
 ### Encajes con el mundo real
@@ -410,8 +412,6 @@ ni documentos.
 
 - El editor visual de perfiles solo manipula segmentos rectos; arcos y Bézier existen en el
   núcleo pero no tienen edición visual completa.
-- El gizmo mueve y gira, pero no escala, no resalta el asa al pasar el ratón —no tiene área
-  de seguimiento— y no ofrece ajuste por incrementos al arrastrar con ⇧.
 - Los perfiles se calibran con el cupón y se guardan, pero no se editan umbral a umbral ni
   tienen versión propia: se puede cambiar la holgura midiendo, no la boquilla ni el voladizo
   a mano. Y ninguna holgura calibrada se ha contrastado todavía con impresiones sostenidas,
@@ -473,8 +473,7 @@ sino cerrar confianza, reproducibilidad e interacción. Añadir formas nuevas qu
    bien» de «no ha podido verla».
 3. Selección y modificación directa de partes orgánicas, incluidos los puntos de control
    de una curva agarrados en el viewport.
-4. Terminar el gizmo —escala, resalte al pasar el ratón y ajuste por incrementos— y de ahí
-   a ensamblajes ligeros e interferencias.
+4. Ensamblajes ligeros e interferencias, ahora que el gizmo coloca piezas de verdad.
 5. Editar y versionar perfiles a mano, más allá de calibrarlos con el cupón y guardarlos,
    que ya funciona.
 6. Un encaje que gobierne dos cotas independientes. Hoy gobierna la extensión en un eje y
