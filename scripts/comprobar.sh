@@ -15,6 +15,8 @@
 #   5. El gizmo: proyectar es la vuelta exacta del rayo, y arrastrar mueve y gira hacia
 #      donde se arrastra. Otro sitio donde un signo no da error, da un gesto al revés.
 #   6. Que la aplicación de escritorio compile y enlace contra el núcleo real.
+#   7. Que la orden de terminal enlace y arranque: es el mismo núcleo sin ventana, y se
+#      rompe en silencio si nadie la construye.
 #
 #     ./scripts/comprobar.sh          # todo
 #     ./scripts/comprobar.sh nucleo   # solo las pruebas del núcleo, que es lo rápido
@@ -56,6 +58,17 @@ swiftc -O tools/gizmo/main.swift apps/mac/Sources/Camara.swift apps/mac/Sources/
 paso "Aplicación de escritorio"
 ./scripts/construir-mac.sh debug >/dev/null
 echo "Yunkil.app construida"
+
+paso "Orden de terminal"
+# Enlaza el ejecutable nativo y lo hace hablar. Comparte la compilación con el framework
+# de la aplicación, así que lo que se paga aquí es el enlazado.
+./scripts/construir-cli.sh >/dev/null
+if salida=$(./build/yunkil perfiles); then
+    echo "${salida%%$'\n'*}"
+else
+    echo "la orden de terminal no arrancó"
+    fallos=$((fallos + 1))
+fi
 
 if [ "$fallos" -gt 0 ]; then
     printf '\n\033[1;31m%s comprobaciones fallaron\033[0m\n' "$fallos"

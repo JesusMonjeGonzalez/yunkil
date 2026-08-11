@@ -83,7 +83,7 @@ flowchart TD
 ```text
 core/       Kotlin Multiplatform geometry, document, analysis and export
 apps/mac/   native SwiftUI application and Metal viewport
-tools/      CPU/Metal parity, proposal-preview and camera-ray harnesses
+tools/      CPU/Metal parity, proposal-preview, camera-ray and gizmo harnesses
 scripts/    build, install and verification entry points
 docs/       detailed design, limits and implementation notes
 ```
@@ -136,6 +136,27 @@ Install into `/Applications` when writable, otherwise `~/Applications`:
 ```bash
 ./scripts/instalar.sh
 ```
+
+## The Same Core Without A Window
+
+`yunkil` is a native command-line binary linked against the same Kotlin core — no JVM
+on the machine that runs it. It answers the question a slicer cannot: *will this part
+survive this printer?*
+
+```bash
+./scripts/construir-cli.sh instalar
+
+yunkil examinar descargado.stl --perfil "Prusa MK4 · PLA · 0,4"
+yunkil exportar pieza.yunkil pieza.3mf --detalle 0.3
+yunkil perfiles
+```
+
+`examinar` measures wall thickness, overhangs, unsupported material, first-layer area
+and slenderness against a printer and material profile, and reports mesh topology. It
+exits `1` when something will fail and `2` when the part could not be read at all, so
+it works as a guard in a script or a CI step before slicing. `--json` emits the whole
+report. `exportar` writes the file only when the certificate passes; given an STL it
+is the flagship path — an arbitrary mesh in, a verified one out.
 
 ## Verification
 

@@ -15,6 +15,14 @@ kotlin {
         }
     }
 
+    // El mismo núcleo, sin ventana: examinar un STL o exportar un documento desde la
+    // terminal, un script o CI. Sale un ejecutable suelto, sin JVM que instalar.
+    macosArm64 {
+        binaries.executable("yunkil") {
+            entryPoint = "yunkil.cli.main"
+        }
+    }
+
     sourceSets {
         commonMain.dependencies {
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
