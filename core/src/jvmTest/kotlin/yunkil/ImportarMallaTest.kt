@@ -2,11 +2,14 @@ package yunkil
 
 import yunkil.doc.Documento
 import yunkil.doc.Editor
+import yunkil.doc.MallaImportada
 import java.io.File
 import java.nio.file.Files
 import kotlin.test.AfterTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -133,6 +136,41 @@ class ImportarMallaTest {
         val perdidas = abierto.rehornearMallas()
 
         assertTrue(perdidas == listOf("origen"), "debería nombrar la que falta, y dio $perdidas")
+    }
+
+    @Test
+    fun `hornear no toca el documento, que es lo que permite hacerlo en otro hilo`() {
+        // La importación va partida en dos a propósito: hornear es lo caro —rasterizar
+        // cada triángulo contra una rejilla— y es lo único que puede irse a otro hilo.
+        // Para eso no puede tocar nada del editor, ni siquiera `ultimoError`, así que el
+        // motivo del fallo viaja en el propio resultado.
+        val ruta = stlDeFuera()
+        val editor = Editor(Documento.vacio())
+        val filasAntes = editor.filas().size
+
+        val horneada = editor.hornearMallaDesde(ruta)
+
+        assertTrue(horneada is MallaImportada.Lista, "no horneó: $horneada")
+        assertEquals(filasAntes, editor.filas().size, "hornear ha metido algo en el árbol")
+        assertTrue(editor.estaVacio, "hornear ha cambiado el documento")
+        assertNull(editor.ultimoError, "hornear ha escrito en el estado compartido")
+
+        assertTrue(editor.colocarMalla(horneada), "colocar falló: ${editor.ultimoError}")
+        assertEquals(filasAntes + 1, editor.filas().size)
+        assertEquals("origen", assertNotNull(editor.filas().firstOrNull { it.tipo == "MALLA" }).nombre)
+    }
+
+    @Test
+    fun `hornear un archivo que no es un STL devuelve el motivo sin tocar el editor`() {
+        val basura = File(temporal, "tampoco.stl")
+        basura.writeText("esto tampoco es un STL")
+
+        val editor = Editor(Documento.vacio())
+        val horneada = editor.hornearMallaDesde(basura.absolutePath)
+
+        assertTrue(horneada is MallaImportada.Fallo, "debería fallar: $horneada")
+        assertTrue("STL" in horneada.motivo, "el motivo debería explicarlo: ${horneada.motivo}")
+        assertNull(editor.ultimoError, "el fallo no se escribe en el editor, viaja en el resultado")
     }
 
     @Test

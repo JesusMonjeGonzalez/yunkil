@@ -599,6 +599,10 @@ final class EstadoDeLaApp: ObservableObject {
     @Published var analizarAlCrear = UserDefaults.standard.object(forKey: "fab.auto") as? Bool ?? true
     @Published private(set) var informe: InformeDeFabricacion?
     @Published private(set) var analizando = false
+
+    /// Hay una malla horneándose en otro hilo. Sirve para no lanzar dos a la vez y para
+    /// decirlo en pantalla: sin señal, arrastrar un STL grande parece no hacer nada.
+    @Published private(set) var importandoMalla = false
     @Published private(set) var orientaciones: [OrientacionEvaluada] = []
 
     // Transformación de la pieza seleccionada, en milímetros y grados.
@@ -2034,21 +2038,43 @@ final class EstadoDeLaApp: ObservableObject {
     /// queda examinada contra la impresora con cada aviso nombrando la pieza y
     /// trayendo su arreglo ejecutable. Lo único que faltaba era el cable entre lo
     /// que ya existía —`importarMalla` y `analizarFabricacion`—.
+    /// Trae un STL de fuera sin congelar la ventana.
+    ///
+    /// Hornear es rasterizar cada triángulo contra una rejilla: con una pieza descargada
+    /// de internet son segundos, y hasta ahora se pagaban con la interfaz parada, que es
+    /// indistinguible de una aplicación colgada. El núcleo tiene la importación partida en
+    /// dos justo para esto —`hornearMallaDesde` no toca el documento—, así que lo caro se
+    /// hace en un editor aislado y en otro hilo, como el análisis, y lo único que vuelve al
+    /// hilo principal es el campo ya horneado.
     func importarMallaDesde(ruta: String) {
-        // Hornear tarda: es rasterizar cada triángulo contra una rejilla. Se avisa
-        // antes de bloquear, porque si no parece que la aplicación se ha colgado.
+        guard !importandoMalla else { return }
+        importandoMalla = true
         aviso = "Preparando la malla…"
-        if editor.importarMalla(ruta: ruta, resolucion: 0, padreId: nil) {
-            // `ultimoError` trae aquí un aviso, no un fallo: la pieza ya está puesta.
-            aviso = editor.ultimoError
-            refrescar(recompilo: true)
-            renderizador?.encuadrar()
-            // El análisis corre en segundo plano y el informe sale con la pieza
-            // ya en la escena: es la mitad del producto «STL devuelto imprimible».
-            if analizarAlCrear { analizarFabricacion() }
-        } else {
-            aviso = editor.ultimoError ?? "No se pudo importar la malla."
+
+        Task.detached(priority: .userInitiated) {
+            let aislado = Editor(inicial: Documento.companion.vacio())
+            let horneada = aislado.hornearMallaDesde(ruta: ruta, resolucion: 0)
+            await MainActor.run { self.colocar(horneada) }
         }
+    }
+
+    private func colocar(_ horneada: MallaImportada) {
+        importandoMalla = false
+        guard let lista = horneada as? MallaImportadaLista else {
+            aviso = (horneada as? MallaImportadaFallo)?.motivo ?? "No se pudo importar la malla."
+            return
+        }
+        guard editor.colocarMalla(horneada: lista, padreId: nil) else {
+            aviso = editor.ultimoError ?? "No se pudo colocar la malla."
+            return
+        }
+        // `ultimoError` trae aquí un aviso, no un fallo: la pieza ya está puesta.
+        aviso = editor.ultimoError
+        refrescar(recompilo: true)
+        renderizador?.encuadrar()
+        // El análisis corre en segundo plano y el informe sale con la pieza ya en la
+        // escena: es la mitad del producto «STL devuelto imprimible».
+        if analizarAlCrear { analizarFabricacion() }
     }
 
     func abrir() {
@@ -3115,12 +3141,21 @@ struct VistaPrincipal: View {
     }
 
     private var barraDeEstado: some View {
-        Text(estado.estadoDelRender)
-            .font(Tipo.cifraFuerte)
-            .foregroundStyle(.white.opacity(0.85))
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
-            .padding(12)
+        HStack(spacing: 8) {
+            Text(estado.estadoDelRender)
+            // Hornear una malla descargada son segundos. Se dice encima del visor y no
+            // en el inspector: es donde está mirando quien acaba de soltar el archivo.
+            if estado.importandoMalla {
+                Divider().frame(height: 11)
+                ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 12, height: 12)
+                Text("horneando la malla…")
+            }
+        }
+        .font(Tipo.cifraFuerte)
+        .foregroundStyle(.white.opacity(0.85))
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
+        .padding(12)
     }
 
     /// Qué hace cada brocha, dicho donde se elige y no en un manual aparte.

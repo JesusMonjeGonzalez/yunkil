@@ -98,6 +98,27 @@ data class PlanInterpretado(
     val preguntas: List<String> get() = plan?.preguntas.orEmpty()
 }
 
+/**
+ * Una malla leída y horneada, todavía fuera del documento.
+ *
+ * Existe para poder partir la importación en dos: lo caro y puro —leer el STL y rasterizar
+ * su campo, que son segundos— y lo que muta el documento, que es inmediato. Así lo primero
+ * puede hacerse en otro hilo sin que la ventana se quede congelada, y el motivo del fallo
+ * viaja aquí dentro en vez de escribirse en el `ultimoError` del editor, que es estado
+ * compartido y no se toca desde fuera del hilo de la interfaz.
+ */
+sealed interface MallaImportada {
+    data class Lista(
+        val campo: CampoDeMalla,
+        val ruta: String,
+        val nombre: String,
+        /** Lo que hay que decir aunque la pieza entre igual: una malla abierta, por ejemplo. */
+        val aviso: String?,
+    ) : MallaImportada
+
+    data class Fallo(val motivo: String) : MallaImportada
+}
+
 /** Un parámetro listo para pintar un control, con sus límites ya resueltos. */
 data class ParametroVisible(
     val clave: String,
@@ -1240,13 +1261,37 @@ class Editor(inicial: Documento = Documento.vacio()) {
      * con agujeros el resultado es poco fiable. Pero negarse dejaría fuera la mitad de
      * lo que circula por internet, así que se importa y se dice.
      */
-    fun importarMalla(ruta: String, resolucion: Float = 0f, padreId: String? = null): Boolean {
-        val bytes = leerArchivo(ruta) ?: return rechazar("No se pudo leer $ruta")
+    fun importarMalla(ruta: String, resolucion: Float = 0f, padreId: String? = null): Boolean =
+        when (val horneada = hornearMallaDesde(ruta, resolucion)) {
+            is MallaImportada.Fallo -> rechazar(horneada.motivo)
+            is MallaImportada.Lista -> colocarMalla(horneada, padreId)
+        }
+
+    /**
+     * Lee el STL y hornea su campo, **sin tocar el editor**.
+     *
+     * Es la parte cara —rasterizar cada triángulo contra una rejilla— y la única que se
+     * puede hacer fuera del hilo de la interfaz, así que se separa de la parte que muta el
+     * documento. Por eso devuelve el motivo del fallo en el resultado en vez de escribirlo
+     * en `ultimoError`: escribir estado compartido desde otro hilo es justo lo que esta
+     * división existe para evitar.
+     *
+     * Se comprueba la topología antes de hornear y **se avisa sin bloquear**. El signo del
+     * campo sale de contar cruces, y eso da por supuesto que la superficie cierra; con
+     * agujeros el resultado es poco fiable. Pero negarse dejaría fuera la mitad de lo que
+     * circula por internet, así que se importa y se dice.
+     */
+    fun hornearMallaDesde(ruta: String, resolucion: Float = 0f): MallaImportada {
+        val bytes = leerArchivo(ruta) ?: return MallaImportada.Fallo("No se pudo leer $ruta")
 
         val leido = LectorStl.leer(bytes)
-        if (leido is LectorStl.Resultado.Fallo) return rechazar("No es un STL válido: ${leido.motivo}")
+        if (leido is LectorStl.Resultado.Fallo) {
+            return MallaImportada.Fallo("No es un STL válido: ${leido.motivo}")
+        }
         val malla = (leido as LectorStl.Resultado.Leida).malla
-        if (malla.numeroDeTriangulos == 0) return rechazar("El archivo no trae ningún triángulo")
+        if (malla.numeroDeTriangulos == 0) {
+            return MallaImportada.Fallo("El archivo no trae ningún triángulo")
+        }
 
         val topologia = malla.revisarTopologia()
         val aviso = if (topologia.esCerrada) null else
@@ -1261,14 +1306,23 @@ class Editor(inicial: Documento = Documento.vacio()) {
         val campo = try {
             CampoDeMalla.hornear(malla.vertices, malla.triangulos, paso, origen = ruta)
         } catch (e: Throwable) {
-            return rechazar("No se pudo hornear la malla: ${e.message}")
+            return MallaImportada.Fallo("No se pudo hornear la malla: ${e.message}")
         }
 
-        val nombre = ruta.substringAfterLast('/').substringBeforeLast('.').ifBlank { "Malla" }
+        return MallaImportada.Lista(
+            campo = campo,
+            ruta = ruta,
+            nombre = ruta.substringAfterLast('/').substringBeforeLast('.').ifBlank { "Malla" },
+            aviso = aviso,
+        )
+    }
+
+    /** Coloca en el documento un campo ya horneado. Esto es lo barato, y va en el hilo de siempre. */
+    fun colocarMalla(horneada: MallaImportada.Lista, padreId: String? = null): Boolean {
         val nueva = Pieza.nueva(TipoPieza.MALLA).copy(
-            nombre = nombre,
-            rutaDeMalla = ruta,
-            campoDeMalla = campo,
+            nombre = horneada.nombre,
+            rutaDeMalla = horneada.ruta,
+            campoDeMalla = horneada.campo,
         )
         val destino = destinoValidoPara(padreId ?: documento.raiz.id)
 
@@ -1280,7 +1334,7 @@ class Editor(inicial: Documento = Documento.vacio()) {
         }
         // El aviso viaja por `ultimoError` a propósito: la pieza ya está puesta, pero
         // quien la mire tiene que enterarse de que su interior es una suposición.
-        if (aplicado && aviso != null) ultimoError = aviso
+        if (aplicado && horneada.aviso != null) ultimoError = horneada.aviso
         return aplicado
     }
 

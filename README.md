@@ -176,13 +176,12 @@ verification gates.
 - Advanced prototype without sustained external print validation.
 - macOS/Apple Silicon application only; no finished iPad application.
 - Calibration generation and profile derivation exist, but editable calibrated profiles are not persisted yet.
-- Imported-mesh baking can block the main thread.
 - The macOS UI builds but does not have an automated UI test suite.
 - No signed, notarized public release.
 
 ## Current Focus
 
-1. Add application-level tests and move expensive mesh work off the main thread.
+1. Add application-level tests.
 2. Complete persistent machine calibration and real-print validation.
 3. Sign and notarize a public release.
 
