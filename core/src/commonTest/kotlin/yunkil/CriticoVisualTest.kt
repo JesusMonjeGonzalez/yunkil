@@ -3,6 +3,7 @@ package yunkil
 import yunkil.doc.Documento
 import yunkil.doc.Editor
 import yunkil.ia.CriticoVisual
+import yunkil.ia.Mirada
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -65,6 +66,39 @@ class CriticoVisualTest {
     fun `un no cumple sin ningun reparo nombrado se lee como cumple`() {
         val v = CriticoVisual.leer("VEREDICTO: NO CUMPLE\nNo estoy seguro de que esté del todo bien.")
         assertTrue(v.cumple, "sin un reparo concreto no hay nada que corregir")
+    }
+
+    /**
+     * «Pasa» y «lo he mirado y está bien» no son lo mismo, y la interfaz las cuenta
+     * distinto: la primera deja seguir al bucle, la segunda firma una revisión. Un visor
+     * que protesta sin saber decir qué deja pasar la pieza y **no** la aprueba.
+     */
+    @Test
+    fun `la mirada distingue aprobar de dejar pasar`() {
+        val aprobada = CriticoVisual.leer("VEREDICTO: CUMPLE\nEs una caja abierta por arriba.")
+        assertEquals(Mirada.APROBADA, aprobada.mirada)
+        assertTrue(aprobada.mirada.esAprobacion)
+
+        val conReparos = CriticoVisual.leer("VEREDICTO: NO CUMPLE\n- falta el agujero del centro")
+        assertEquals(Mirada.CON_REPAROS, conReparos.mirada)
+        assertFalse(conReparos.mirada.esAprobacion, "con reparos no se aprueba nada")
+
+        val dudosa = CriticoVisual.leer("VEREDICTO: NO CUMPLE\nNo estoy seguro.")
+        assertTrue(dudosa.cumple, "sigue dejando pasar, que es la política")
+        assertEquals(Mirada.DUDOSA, dudosa.mirada)
+        assertFalse(dudosa.mirada.esAprobacion, "protestar sin decir qué no es aprobar")
+        assertTrue(dudosa.mirada.seMiro, "pero mirarla, la miró")
+    }
+
+    @Test
+    fun `no haber podido mirar la pieza no se cuenta como haberla mirado`() {
+        // Los tres modos en que el crítico se cae. Todos dejan pasar la pieza —es un
+        // revisor de más— y ninguno puede decir que la haya visto nadie.
+        for (sin in listOf(Mirada.SIN_DIBUJO, Mirada.SIN_VISOR, Mirada.SIN_RESPUESTA)) {
+            assertFalse(sin.seMiro, "$sin no debería contar como mirada")
+            assertFalse(sin.esAprobacion, "$sin no aprueba nada")
+            assertTrue(sin.etiqueta.startsWith("sin mirar"), "y hay que poder leerlo: ${sin.etiqueta}")
+        }
     }
 
     @Test

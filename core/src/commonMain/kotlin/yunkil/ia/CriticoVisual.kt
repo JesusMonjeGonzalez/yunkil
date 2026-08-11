@@ -1,7 +1,48 @@
 package yunkil.ia
 
-/** Lo que dice el crítico visual después de mirar la pieza. */
-data class VeredictoVisual(val cumple: Boolean, val reparos: List<String> = emptyList())
+/**
+ * Lo que dice el crítico visual después de mirar la pieza.
+ *
+ * `cumple` decide si el bucle sigue; [mirada] dice qué contarle al usuario, que no es lo
+ * mismo: un «no cumple» que no sabe nombrar ningún fallo deja pasar la pieza —así está
+ * decidido— pero no es una aprobación, y contarlo como tal sería firmar una revisión que
+ * nadie ha hecho.
+ */
+data class VeredictoVisual(
+    val cumple: Boolean,
+    val reparos: List<String> = emptyList(),
+    val mirada: Mirada = Mirada.APROBADA,
+)
+
+/**
+ * Qué ha pasado al intentar mirar la pieza.
+ *
+ * Existe porque «no tengo reparos» y «no he podido mirarla» se contaban igual —una lista
+ * vacía— y son cosas muy distintas: la primera es un revisor más que la aprueba, la segunda
+ * es un revisor que no estaba. Que el crítico falle abierto es deliberado y sigue siéndolo;
+ * lo que no puede es fallar **callado**, porque entonces el usuario cree que se ha revisado
+ * algo que nadie ha visto.
+ *
+ * Es la misma regla que el resto del producto aplica a las medidas: un número sin
+ * procedencia es una opinión.
+ */
+enum class Mirada(val etiqueta: String) {
+    APROBADA("mirada: es la pieza que se pidió"),
+    CON_REPAROS("mirada: hay algo que no encaja"),
+
+    /** Miró, protestó y no supo decir qué. Pasa, pero no cuenta como aprobada. */
+    DUDOSA("mirada: el visor protestó sin decir qué"),
+
+    SIN_DIBUJO("sin mirar: no se pudo dibujar la pieza"),
+    SIN_VISOR("sin mirar: no hay ningún modelo con visión disponible"),
+    SIN_RESPUESTA("sin mirar: el visor no contestó");
+
+    /** Si de verdad llegó a verse. Lo demás pasa igual, pero no lo ha revisado nadie. */
+    val seMiro: Boolean get() = this == APROBADA || this == CON_REPAROS || this == DUDOSA
+
+    /** Si alguien puede decir que la pieza está revisada a la vista. */
+    val esAprobacion: Boolean get() = this == APROBADA
+}
 
 /**
  * El crítico visual: lo único del bucle que **mira** la pieza en vez de medirla.
@@ -88,7 +129,7 @@ object CriticoVisual {
 
     fun leer(respuesta: String): VeredictoVisual {
         val texto = respuesta.lowercase()
-        if ("no cumple" !in texto) return VeredictoVisual(cumple = true)
+        if ("no cumple" !in texto) return VeredictoVisual(cumple = true, mirada = Mirada.APROBADA)
 
         val reparos = respuesta.lineSequence()
             .map { it.trim() }
@@ -99,10 +140,11 @@ object CriticoVisual {
             .toList()
 
         // Una queja que no sabe decir qué está mal no es un fallo, es un modelo de
-        // visión dubitativo. No se le puede pedir al modelo de texto que arregle eso.
-        if (reparos.isEmpty()) return VeredictoVisual(cumple = true)
+        // visión dubitativo. No se le puede pedir al modelo de texto que arregle eso, así
+        // que pasa; pero pasa **como dudosa**, no como aprobada.
+        if (reparos.isEmpty()) return VeredictoVisual(cumple = true, mirada = Mirada.DUDOSA)
 
-        return VeredictoVisual(cumple = false, reparos = reparos)
+        return VeredictoVisual(cumple = false, reparos = reparos, mirada = Mirada.CON_REPAROS)
     }
 
     /** Los reparos, tal y como se le cuentan al modelo que tiene que corregir. */

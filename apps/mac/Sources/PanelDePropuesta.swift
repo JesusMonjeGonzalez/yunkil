@@ -26,6 +26,9 @@ struct PropuestaPendiente {
     let avisos: [String]
     /// Operaciones que añadió Yunkil por su cuenta para unir lo que quedaba suelto.
     let cosidas: Int
+    /// Qué pasó al mirar la pieza, o `nil` si no se llegó a mirar porque los números ya
+    /// habían fallado. Se enseña siempre: «no he podido mirarla» es un dato, no un hueco.
+    let mirada: Mirada?
     /// Índices marcados. Empiezan todos: la propuesta se acepta entera por omisión y
     /// desmarcar es la excepción, no al revés.
     var aceptadas: Set<Int>
@@ -87,6 +90,20 @@ struct PanelDePropuesta: View {
                 )
                 .font(Tipo.cuerpo)
                 .foregroundStyle(Tinta.cota)
+            }
+            // Quién ha revisado esto a la vista, y si no lo ha revisado nadie, decirlo.
+            //
+            // Que el crítico visual falle abierto es deliberado —es un revisor de más—,
+            // pero fallar callado convertía «no he podido mirarla» en algo que se leía
+            // igual que una aprobación. Es la misma regla que las medidas: sin procedencia,
+            // un dato es una opinión.
+            if let mirada = propuesta.mirada {
+                Label(mirada.etiqueta, systemImage: mirada.seMiro ? "eye" : "eye.slash")
+                    .font(Tipo.cuerpo)
+                    .foregroundStyle(
+                        mirada.esAprobacion ? Tinta.calibre
+                            : (mirada.seMiro ? Tinta.cota : Tinta.riesgo)
+                    )
             }
             // La leyenda del fantasma. Un color sin explicar es una adivinanza, y esta
             // se lee justo en el momento de decidir.

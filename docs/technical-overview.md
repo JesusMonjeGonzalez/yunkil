@@ -15,7 +15,7 @@ El producto busca unir tres capacidades que normalmente están separadas:
 
 1. Describir, enseñar o editar una pieza mediante IA sin ejecutar código generado.
 2. Entregar geometría editable y verificablemente imprimible, no una malla opaca sin cotas.
-3. Sostener el **encaje con un objeto real** como una relación del documento, no como una
+2. Sostener el **encaje con un objeto real** como una relación del documento, no como una
    cota que alguien calculó una vez y nadie puede volver a justificar.
 
 La tercera es la que distingue a Yunkil de un laminador. Bambu Studio y OrcaSlicer laminan,
@@ -202,6 +202,9 @@ modelo neuronal propio.
 - Las imágenes se reducen a 1024 px y solo se envían a modelos con capacidad visual
   declarada o comprobada.
 - El crítico visual compara la referencia original con frente, lado, planta e isométrica.
+- La propuesta dice si la pieza **se ha llegado a mirar**. El crítico falla abierto a
+  propósito, pero ya no falla callado: «la he mirado y es la pieza», «protestó sin decir
+  qué» y «no había visor» eran antes la misma lista vacía.
   Si no hay visor, red o respuesta legible, deja pasar la pieza a propósito: es un revisor
   *de más* y uno que se cae no puede tumbar un plan que los revisores exactos aprobaron.
   Hoy eso no se distingue de haberla mirado y aprobado.
@@ -467,31 +470,27 @@ sino cerrar confianza, reproducibilidad e interacción. Añadir formas nuevas qu
    máquinas distintas, medirlos y comprobar que la holgura que sale encaja de verdad.
 1. Igualar el flujo orgánico de IA al paramétrico: fantasma, revisión por rondas, revisión
    de documento ligada a la propuesta y bitácora.
-2. Decir cuándo la crítica visual no ha llegado a mirar la pieza. Que falle abierta es
-   deliberado —es un revisor de más, y uno que se cae no puede tumbar un plan que los
-   revisores exactos ya aprobaron—, pero hoy no se distingue «la ha visto y le parece
-   bien» de «no ha podido verla».
-3. Selección y modificación directa de partes orgánicas, incluidos los puntos de control
+2. Selección y modificación directa de partes orgánicas, incluidos los puntos de control
    de una curva agarrados en el viewport.
-4. Ensamblajes ligeros e interferencias, ahora que el gizmo coloca piezas de verdad.
-5. Editar y versionar perfiles a mano, más allá de calibrarlos con el cupón y guardarlos,
+3. Ensamblajes ligeros e interferencias, ahora que el gizmo coloca piezas de verdad.
+4. Editar y versionar perfiles a mano, más allá de calibrarlos con el cupón y guardarlos,
    que ya funciona.
-6. Un encaje que gobierne dos cotas independientes. Hoy gobierna la extensión en un eje y
+5. Un encaje que gobierne dos cotas independientes. Hoy gobierna la extensión en un eje y
    la ajusta escalando uniformemente, así que atar el diámetro de un cilindro le mueve la
    altura; es coherente con la escala uniforme del sistema y aun así deja fuera media
    mecánica.
-7. Editor visual de perfiles con líneas, arcos, Bézier, cotas y restricciones.
-8. Curvas en el DSL paramétrico, para cables, latiguillos y guías técnicas.
-9. Reconstrucción multivista propia y backend Core ML/Metal para imagen a geometría.
-10. SVG y texto paramétrico como perfiles multicontorno.
-11. Pintado de las zonas protegidas en el viewport.
-12. División automática de figuras, pasadores, huecos de resina y multicolor.
-13. Puente Bambu: 3MF multiobjeto con plato y ajustes por pieza, y abrir directamente en
+6. Editor visual de perfiles con líneas, arcos, Bézier, cotas y restricciones.
+7. Curvas en el DSL paramétrico, para cables, latiguillos y guías técnicas.
+8. Reconstrucción multivista propia y backend Core ML/Metal para imagen a geometría.
+9. SVG y texto paramétrico como perfiles multicontorno.
+10. Pintado de las zonas protegidas en el viewport.
+11. División automática de figuras, pasadores, huecos de resina y multicolor.
+12. Puente Bambu: 3MF multiobjeto con plato y ajustes por pieza, y abrir directamente en
     Bambu Studio. Hoy el 3MF lleva un solo objeto, así que una pieza y su cupón de
     calibración no pueden salir en la misma placa. Va detrás de lo anterior a propósito:
     es fontanería y no responde a por qué abrir Yunkil, que es lo que responden los
     encajes.
-14. Después: 3MF comprimido e iPad con render por tiles.
+13. Después: 3MF comprimido e iPad con render por tiles.
 
 No se persigue replicar render, animación, rigging o composición de Blender. La ventaja de
 Yunkil debe ser generar, editar semánticamente y certificar piezas técnicas y figuras

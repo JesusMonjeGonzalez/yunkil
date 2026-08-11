@@ -1594,6 +1594,7 @@ final class EstadoDeLaApp: ObservableObject {
                 var cosido: PlanDeModelado?
                 var respuestaAceptada = ""
                 var rondaAceptada = 0
+                var mirada: Mirada?
 
                 for ronda in 1...Self.rondasDeCorreccion {
                     try Task.checkCancellation()
@@ -1649,6 +1650,7 @@ final class EstadoDeLaApp: ObservableObject {
                     }
                     reparos = revision.motivos
                     cosido = revision.cosido
+                    mirada = revision.mirada
 
                     aceptado = leido
                     respuestaAceptada = texto
@@ -1688,6 +1690,7 @@ final class EstadoDeLaApp: ObservableObject {
                     reparos: reparos,
                     avisos: leido.avisos,
                     cosidas: max(0, aplicable.operaciones.count - plan.operaciones.count),
+                    mirada: mirada,
                     aceptadas: Set(lineas.map { Int($0.indice) })
                 )
                 previsualizar(propuestaPendiente)
@@ -2023,7 +2026,7 @@ final class EstadoDeLaApp: ObservableObject {
             let aislado = Editor(inicial: Documento.companion.vacio())
             _ = aislado.desdeJson(texto: documento)
             guard let plan = aislado.interpretarPlan(respuesta: respuesta, edicion: edicion).plan else {
-                return Revision(motivos: [], cosido: nil)
+                return Revision(motivos: [], cosido: nil, mirada: nil)
             }
 
             // La post-condición de cotas va **antes** de mirar los defectos, y aparte:
@@ -2040,11 +2043,11 @@ final class EstadoDeLaApp: ObservableObject {
                 // si la pieza **es** la que se pidió. Va aquí y no antes porque dibujar
                 // y preguntar cuesta una carga de modelo y una inferencia, y gastarlas
                 // en un plan que ya se sabe roto es tirarlas.
-                let aLaVista = await CriticaVisual.reparos(
+                let aLaVista = await CriticaVisual.revisar(
                     editor: aislado, plan: base, peticion: peticion,
                     perfil: perfil, referencia: referencia, seleccion: seleccion
                 )
-                return Revision(motivos: aLaVista, cosido: acotado)
+                return Revision(motivos: aLaVista.reparos, cosido: acotado, mirada: aLaVista.mirada)
             }
 
             // El revisor no solo mide: cuando lo que falla es que dos piezas no se
@@ -2052,12 +2055,15 @@ final class EstadoDeLaApp: ObservableObject {
             // inferencia entera y, sobre todo, no depende de que el modelo copie
             // bien una línea de JSON. Si el cosido no arregla nada, `coserPlan`
             // devuelve nil y el fallo sigue su camino hacia la ronda de corrección.
+            // Con reparos exactos no se llega a dibujar nada: el crítico visual va después
+            // a propósito, porque cuesta una carga de modelo y una inferencia.
             guard let cosido = aislado.coserPlan(plan: base, nombrePerfil: perfil) else {
-                return Revision(motivos: revision.motivos, cosido: acotado)
+                return Revision(motivos: revision.motivos, cosido: acotado, mirada: nil)
             }
             return Revision(
                 motivos: aislado.revisarPlan(plan: cosido, nombrePerfil: perfil).motivos,
-                cosido: cosido
+                cosido: cosido,
+                mirada: nil
             )
         }.value
     }
@@ -2066,6 +2072,9 @@ final class EstadoDeLaApp: ObservableObject {
     struct Revision {
         let motivos: [String]
         let cosido: PlanDeModelado?
+        /// Qué pasó al mirarla, o `nil` si no se llegó a esa fase porque los números ya
+        /// habían fallado. `nil` y «no se pudo mirar» no son lo mismo y no se confunden.
+        let mirada: Mirada?
     }
 
     // MARK: Analizador de fabricación

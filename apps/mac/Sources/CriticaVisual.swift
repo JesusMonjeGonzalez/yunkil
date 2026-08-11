@@ -20,23 +20,28 @@ enum CriticaVisual {
     /// que se desboca cuesta más que el modelo al que critica.
     private static let presupuesto = 600
 
-    /// Lo que le falla a la pieza a la vista, o vacío si pasa.
+    /// Lo que le falla a la pieza a la vista, y **si se llegó a mirar**.
     ///
-    /// **Cualquier problema devuelve vacío**: sin geometría que dibujar, sin visor
-    /// instalado, sin red o con una respuesta que no se entiende, la pieza pasa. El
-    /// crítico visual es un revisor *de más*, y uno que se cae no puede tumbar un plan
-    /// que los revisores exactos ya dieron por bueno.
-    static func reparos(
+    /// Cualquier problema deja pasar la pieza —sin geometría que dibujar, sin visor
+    /// instalado, sin red o con una respuesta que no se entiende—: el crítico visual es un
+    /// revisor *de más*, y uno que se cae no puede tumbar un plan que los revisores exactos
+    /// ya dieron por bueno. Fallar abierto sigue siendo la política.
+    ///
+    /// Lo que ya no hace es fallar **callado**. Antes todo eso devolvía la misma lista
+    /// vacía que una aprobación, así que «la he mirado y es la pieza» y «no he podido
+    /// mirarla» llegaban a la interfaz indistinguibles, y el usuario daba por revisado algo
+    /// que nadie había visto.
+    static func revisar(
         editor: Editor,
         plan: PlanDeModelado,
         peticion: String,
         perfil: String,
         referencia: ImagenDeReferencia?,
         seleccion: AISelection
-    ) async -> [String] {
+    ) async -> (reparos: [String], mirada: Mirada) {
         guard let png = editor.vistasDelPlanComoDatos(
             plan: plan, lado: 320, nombrePerfil: perfil
-        ) else { return [] }
+        ) else { return ([], .sinDibujo) }
 
         let visor = seleccion.supportsImage == true
             ? seleccion
@@ -56,9 +61,11 @@ enum CriticaVisual {
                 imagenes: [referencia, .dePng(png)].compactMap { $0 }
             )
             let veredicto = CriticoVisual.shared.leer(respuesta: respuesta)
-            return veredicto.cumple ? [] : veredicto.reparos
+            return (veredicto.cumple ? [] : veredicto.reparos, veredicto.mirada)
         } catch {
-            return []
+            // Sin visor instalado y sin red se distinguen mal desde aquí, y para lo que
+            // hay que contar da igual: en los dos casos nadie ha mirado la pieza.
+            return ([], visor.provider == .local ? .sinVisor : .sinRespuesta)
         }
     }
 }
