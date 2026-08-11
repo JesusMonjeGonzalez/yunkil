@@ -46,6 +46,54 @@ final class VistaMetalInteractiva: MTKView {
     var alContinuarEsculpiendo: ((SIMD3<Float>, SIMD3<Float>) -> Void)?
     var alTerminarDeEsculpir: (() -> Void)?
 
+    /// Centro del gizmo en el mundo, o `nil` si no hay nada que mover.
+    /// Lo manda SwiftUI en cada refresco: es la pieza seleccionada.
+    var centroDelGizmo: SIMD3<Float>? {
+        didSet {
+            guard centroDelGizmo != oldValue else { return }
+            capaDelGizmo.needsDisplay = true
+        }
+    }
+
+    /// Marca el punto de deshacer del gesto entero, una sola vez al agarrar.
+    var alEmpezarGestoDelGizmo: (() -> Void)?
+    /// Un fotograma de arrastre por una flecha: dirección del mundo y milímetros.
+    var alMoverConGizmo: ((SIMD3<Float>, Float) -> Void)?
+    /// Un fotograma de arrastre por un anillo: eje del mundo y grados.
+    var alGirarConGizmo: ((SIMD3<Float>, Float) -> Void)?
+
+    /// El asa agarrada, mientras dure el arrastre. Con una agarrada no se orbita.
+    private var asaDelGizmo: Gizmo.Asa?
+    /// Última posición del cursor en coordenadas de proyección, para el giro: el ángulo
+    /// se mide entre dos puntos, no a partir del recorrido del ratón.
+    private var ultimoUv = SIMD2<Float>(0, 0)
+
+    private lazy var capaDelGizmo: CapaDelGizmo = {
+        let capa = CapaDelGizmo(vista: self)
+        capa.autoresizingMask = [.width, .height]
+        capa.frame = bounds
+        addSubview(capa)
+        return capa
+    }()
+
+    /// El gizmo tal y como está ahora mismo, o `nil` si no hay que dibujarlo.
+    ///
+    /// El radio se calcula para que **ocupe siempre lo mismo en pantalla**: atado al
+    /// tamaño de la pieza, una arandela de 4 mm daría un gizmo imposible de agarrar y una
+    /// carcasa de 300 mm uno que taparía la vista.
+    func gizmoActual() -> Gizmo? {
+        guard let centro = centroDelGizmo, let camara = renderizador?.camara else { return nil }
+        let distancia = camara.ortografica
+            ? camara.distancia
+            : simd_length(camara.posicion - centro)
+        let semialtura = tan(camara.campoDeVision * 0.5) * distancia
+        return Gizmo(centro: centro, radio: max(semialtura * 0.22, 0.01))
+    }
+
+    func refrescarGizmo() { capaDelGizmo.needsDisplay = true }
+
+    var asaAgarrada: Gizmo.Asa? { asaDelGizmo }
+
     /// Un arrastre orbita, un clic señala. Se distinguen por recorrido y no por
     /// tiempo: soltar el ratón un poco más tarde no debe cambiar lo que hace.
     private var recorridoDelArrastre: CGFloat = 0
@@ -103,6 +151,20 @@ final class VistaMetalInteractiva: MTKView {
             return
         }
 
+        // El gizmo va antes que el plano de sección: sus asas son dianas de catorce
+        // puntos y el rectángulo del plano ocupa media pantalla. Al revés, con la
+        // sección activa no habría manera de agarrar una flecha.
+        if let gizmo = gizmoActual(), let camara = renderizador?.camara,
+           let uv = uvDelCursor(evento), let aspecto = aspectoDeLaVista(),
+           let asa = gizmo.agarrar(uv: uv, camara: camara, aspecto: aspecto) {
+            asaDelGizmo = asa
+            ultimoUv = uv
+            // Un solo punto de deshacer para el gesto entero, como en el resto de arrastres.
+            alEmpezarGestoDelGizmo?()
+            capaDelGizmo.needsDisplay = true
+            return
+        }
+
         // El plano de sección se agarra sin modificador: es el gizmo del punto 1,
         // el mismo patrón de «grab the surface» con el que se empujan las caras.
         // Si el clic cae en el rectángulo visible del plano, se arrastra el plano.
@@ -125,6 +187,13 @@ final class VistaMetalInteractiva: MTKView {
     override func mouseUp(with evento: NSEvent) {
         caraEnArrastre = nil
         planoEnArrastre = nil
+        if asaDelGizmo != nil {
+            // Soltar el gizmo no señala: un arrastre corto sobre una flecha volvería a
+            // seleccionar lo que hay debajo y saltaría a otra pieza a media colocación.
+            asaDelGizmo = nil
+            capaDelGizmo.needsDisplay = true
+            return
+        }
         if esculpiendo {
             esculpiendo = false
             alTerminarDeEsculpir?()
@@ -135,25 +204,41 @@ final class VistaMetalInteractiva: MTKView {
         alPinchar(rayo.origen, rayo.direccion)
     }
 
-    /// El rayo que sale del cursor, en coordenadas del mundo.
-    private func rayoDelCursor(_ evento: NSEvent) -> (origen: SIMD3<Float>, direccion: SIMD3<Float>)? {
-        guard let renderizador else { return nil }
+    /// El cursor en las coordenadas de proyección: `[-1, 1]` con la Y hacia arriba.
+    ///
+    /// La vista no está volteada, así que su Y ya crece hacia arriba como la del espacio
+    /// de recorte: no hay que invertirla.
+    private func uvDelCursor(_ evento: NSEvent) -> SIMD2<Float>? {
         let punto = convert(evento.locationInWindow, from: nil)
         let tamano = bounds.size
         guard tamano.width > 0, tamano.height > 0 else { return nil }
-
-        // La vista no está volteada, así que su Y ya crece hacia arriba como la del
-        // espacio de recorte: no hay que invertirla.
-        let uv = SIMD2<Float>(
+        return SIMD2<Float>(
             Float(punto.x / tamano.width) * 2 - 1,
             Float(punto.y / tamano.height) * 2 - 1
         )
-        return renderizador.camara.rayo(uv: uv, aspecto: Float(tamano.width / tamano.height))
+    }
+
+    private func aspectoDeLaVista() -> Float? {
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        return Float(bounds.width / bounds.height)
+    }
+
+    /// El rayo que sale del cursor, en coordenadas del mundo.
+    private func rayoDelCursor(_ evento: NSEvent) -> (origen: SIMD3<Float>, direccion: SIMD3<Float>)? {
+        guard let renderizador, let uv = uvDelCursor(evento), let aspecto = aspectoDeLaVista()
+        else { return nil }
+        return renderizador.camara.rayo(uv: uv, aspecto: aspecto)
     }
 
     override func mouseDragged(with evento: NSEvent) {
         recorridoDelArrastre += abs(evento.deltaX) + abs(evento.deltaY)
         guard let renderizador else { return }
+
+        // Con un asa agarrada no se orbita: sería imposible colocar nada.
+        if let asa = asaDelGizmo {
+            arrastrarElGizmo(asa, evento)
+            return
+        }
 
         if esculpiendo {
             recorridoDesdeSello += abs(evento.deltaX) + abs(evento.deltaY)
@@ -201,20 +286,141 @@ final class VistaMetalInteractiva: MTKView {
                 deltaY: Float(evento.deltaY) * 0.008
             )
         }
+        // El gizmo se dibuja proyectado, así que mover la cámara lo mueve a él.
+        capaDelGizmo.needsDisplay = true
+    }
+
+    /// Un fotograma del arrastre de un asa.
+    ///
+    /// Mover se cuenta con el delta del dispositivo, que es lo que tiene la precisión;
+    /// girar, con la posición del cursor, porque el ángulo se mide entre dos puntos y no
+    /// se puede acumular a partir de recorridos.
+    private func arrastrarElGizmo(_ asa: Gizmo.Asa, _ evento: NSEvent) {
+        guard let gizmo = gizmoActual(), let camara = renderizador?.camara,
+              let uv = uvDelCursor(evento), let aspecto = aspectoDeLaVista() else { return }
+
+        switch asa {
+        case .mover(let eje):
+            alMoverConGizmo?(eje.direccion, gizmo.avance(
+                eje: eje, camara: camara,
+                deltaX: Float(evento.deltaX), deltaY: Float(evento.deltaY),
+                alturaEnPuntos: Float(bounds.height)
+            ))
+        case .girar(let eje):
+            alGirarConGizmo?(eje.direccion, gizmo.grados(
+                eje: eje, desde: ultimoUv, hasta: uv, camara: camara, aspecto: aspecto
+            ))
+        }
+        ultimoUv = uv
+        capaDelGizmo.needsDisplay = true
     }
 
     override func rightMouseDragged(with evento: NSEvent) {
         renderizador?.camara.desplazar(deltaX: Float(evento.deltaX), deltaY: Float(evento.deltaY))
+        capaDelGizmo.needsDisplay = true
     }
 
     override func scrollWheel(with evento: NSEvent) {
         guard let renderizador else { return }
         let paso = Float(evento.scrollingDeltaY) * (evento.hasPreciseScrollingDeltas ? 0.002 : 0.05)
         renderizador.camara.acercar(factor: 1 - paso)
+        capaDelGizmo.needsDisplay = true
     }
 
     override func magnify(with evento: NSEvent) {
         renderizador?.camara.acercar(factor: Float(1 - evento.magnification))
+        capaDelGizmo.needsDisplay = true
+    }
+}
+
+/// La capa 2D donde se dibuja el gizmo, encima del viewport de Metal.
+///
+/// Es una vista aparte y no un trozo del shader por lo mismo que el gizmo es aritmética de
+/// cámara: el renderizador no tiene tubería de vértices, y meter las asas en el MSL
+/// generado costaría una recompilación y pasos de trazado por cada flecha. Aquí son cuatro
+/// trazos de `NSBezierPath`.
+///
+/// No se redibuja por fotograma: solo cuando cambia lo que dibuja —la cámara, la pieza o el
+/// asa agarrada—, que es cuando alguien está tocando algo.
+final class CapaDelGizmo: NSView {
+
+    private weak var vista: VistaMetalInteractiva?
+
+    init(vista: VistaMetalInteractiva) {
+        self.vista = vista
+        super.init(frame: vista.bounds)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("solo por código") }
+
+    /// La capa no atiende el ratón: los eventos son de la vista de abajo, que es quien
+    /// sabe orbitar, señalar y agarrar. Sin esto el viewport se quedaría sordo.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let vista, let gizmo = vista.gizmoActual(), let camara = vista.renderizador?.camara,
+              bounds.width > 0, bounds.height > 0 else { return }
+        let aspecto = Float(bounds.width / bounds.height)
+        let agarrada = vista.asaAgarrada
+
+        for anillo in gizmo.anillos(camara: camara, aspecto: aspecto) {
+            let activo = agarrada == .girar(anillo.eje)
+            color(anillo.eje, activo: activo).setStroke()
+            for tramo in anillo.tramos {
+                let trazo = NSBezierPath()
+                trazo.lineWidth = activo ? 2.5 : 1.5
+                trazo.move(to: punto(tramo[0]))
+                for uv in tramo.dropFirst() { trazo.line(to: punto(uv)) }
+                trazo.stroke()
+            }
+        }
+
+        for eje in gizmo.ejes(camara: camara, aspecto: aspecto) {
+            let activo = agarrada == .mover(eje.eje)
+            let tinta = color(eje.eje, activo: activo)
+            tinta.setStroke()
+            tinta.setFill()
+
+            let trazo = NSBezierPath()
+            trazo.lineWidth = activo ? 3 : 2
+            trazo.move(to: punto(eje.base))
+            trazo.line(to: punto(eje.punta))
+            trazo.stroke()
+
+            // La punta es un disco y no una flecha: a este tamaño una punta triangular
+            // se lee peor y, sobre todo, la diana de agarre es un círculo, así que
+            // dibujar un círculo es dibujar dónde hay que pinchar.
+            let radio: CGFloat = activo ? 6.5 : 5
+            let centro = punto(eje.punta)
+            NSBezierPath(ovalIn: NSRect(
+                x: centro.x - radio, y: centro.y - radio, width: radio * 2, height: radio * 2
+            )).fill()
+        }
+    }
+
+    /// De coordenadas de proyección a puntos de la vista. La Y no se voltea: la vista no
+    /// está volteada y su origen ya está abajo a la izquierda, como el de la proyección.
+    private func punto(_ uv: SIMD2<Float>) -> NSPoint {
+        NSPoint(
+            x: (CGFloat(uv.x) + 1) * 0.5 * bounds.width,
+            y: (CGFloat(uv.y) + 1) * 0.5 * bounds.height
+        )
+    }
+
+    /// Rojo, verde y azul: es la convención de todas las herramientas 3D y viene aprendida
+    /// de fuera. Desaturados para que convivan con el grafito del visor, y el asa agarrada
+    /// en blanco, que es lo que dice cuál de ellas está respondiendo al ratón.
+    private func color(_ eje: Gizmo.Eje, activo: Bool) -> NSColor {
+        if activo { return NSColor(red: 0.98, green: 0.99, blue: 1.0, alpha: 1) }
+        switch eje {
+        case .x: return NSColor(red: 0.91, green: 0.36, blue: 0.38, alpha: 0.92)
+        case .y: return NSColor(red: 0.45, green: 0.82, blue: 0.42, alpha: 0.92)
+        case .z: return NSColor(red: 0.36, green: 0.62, blue: 0.95, alpha: 0.92)
+        }
     }
 }
 
@@ -232,8 +438,18 @@ struct VisorMetal: NSViewRepresentable {
     let alTerminarDeEsculpir: () -> Void
     let alSoltarStl: (String) -> Void
 
+    /// Centro del gizmo en el mundo. Cambia con la selección y con cada edición, así que
+    /// llega por aquí y no por una llamada suelta: SwiftUI ya sabe cuándo ha cambiado.
+    let centroDelGizmo: SIMD3<Float>?
+    let alEmpezarGestoDelGizmo: () -> Void
+    let alMoverConGizmo: (SIMD3<Float>, Float) -> Void
+    let alGirarConGizmo: (SIMD3<Float>, Float) -> Void
+
     func makeNSView(context: Context) -> VistaMetalInteractiva {
         let vista = VistaMetalInteractiva()
+        vista.alEmpezarGestoDelGizmo = alEmpezarGestoDelGizmo
+        vista.alMoverConGizmo = alMoverConGizmo
+        vista.alGirarConGizmo = alGirarConGizmo
         vista.alPinchar = alPinchar
         vista.alEmpezarAEmpujar = alEmpezarAEmpujar
         vista.alEmpujar = alEmpujar
@@ -261,10 +477,20 @@ struct VisorMetal: NSViewRepresentable {
         vista.delegate = renderizador
         vista.renderizador = renderizador
         alCrear(renderizador)
+        vista.centroDelGizmo = centroDelGizmo
         return vista
     }
 
-    func updateNSView(_ vista: VistaMetalInteractiva, context: Context) {}
+    func updateNSView(_ vista: VistaMetalInteractiva, context: Context) {
+        // Las clausuras se vuelven a poner: capturan el estado y SwiftUI las recrea.
+        vista.alEmpezarGestoDelGizmo = alEmpezarGestoDelGizmo
+        vista.alMoverConGizmo = alMoverConGizmo
+        vista.alGirarConGizmo = alGirarConGizmo
+        vista.centroDelGizmo = centroDelGizmo
+        // Redibujar aunque el centro no haya cambiado: girar la pieza sobre su propio
+        // centro no lo mueve, y el gizmo tiene que enterarse igual.
+        vista.refrescarGizmo()
+    }
 }
 
 // MARK: - Vista aplanada del árbol
@@ -754,6 +980,46 @@ final class EstadoDeLaApp: ObservableObject {
             milimetros: milimetros,
             registrarEnHistorial: false
         )
+        recompiloElUltimoCambio = recompilo
+        aviso = editor.ultimoError
+        refrescarInspector()
+        renderizador?.sincronizar(recompilar: recompilo)
+    }
+
+    // MARK: Gizmo
+
+    /// Dónde va el gizmo, o `nil` si no toca dibujarlo.
+    ///
+    /// No sale con la raíz seleccionada —mover el documento entero no significa nada— ni
+    /// con una brocha orgánica activa: ahí el clic es del pincel, y unas flechas encima de
+    /// la pieza solo estorbarían el trazo.
+    var centroDelGizmo: SIMD3<Float>? {
+        guard !seleccion.isEmpty, seleccion != raizId, modoBrochaOrganica == "NINGUNA",
+              let c = editor.centroEnElMundo(id: seleccion), c.count == 3 else { return nil }
+        return SIMD3<Float>(c[0].floatValue, c[1].floatValue, c[2].floatValue)
+    }
+
+    /// El punto de deshacer del gesto entero, como en el resto de arrastres.
+    func empezarGestoDelGizmo() { editor.confirmarEdicionContinua() }
+
+    func moverConGizmo(eje: SIMD3<Float>, milimetros: Float) {
+        guard !seleccion.isEmpty, milimetros != 0 else { return }
+        aplicarGesto(editor.moverEnElMundo(
+            id: seleccion, x: eje.x, y: eje.y, z: eje.z, milimetros: milimetros
+        ))
+    }
+
+    func girarConGizmo(eje: SIMD3<Float>, grados: Float) {
+        guard !seleccion.isEmpty, grados != 0 else { return }
+        aplicarGesto(editor.girarEnElMundo(
+            id: seleccion, x: eje.x, y: eje.y, z: eje.z, grados: grados
+        ))
+    }
+
+    /// Un fotograma del arrastre del gizmo: el inspector se refresca porque sus casillas
+    /// de posición y giro son las mismas que el gizmo está moviendo, y verlas quietas
+    /// mientras la pieza se mueve haría dudar de cuál de las dos manda.
+    private func aplicarGesto(_ recompilo: Bool) {
         recompiloElUltimoCambio = recompilo
         aviso = editor.ultimoError
         refrescarInspector()
@@ -1884,7 +2150,11 @@ struct VistaPrincipal: View {
                         estado.continuarEsculpiendo(origen: origen, direccion: direccion)
                     },
                     alTerminarDeEsculpir: { estado.terminarDeEsculpir() },
-                    alSoltarStl: { estado.importarMallaDesde(ruta: $0) }
+                    alSoltarStl: { estado.importarMallaDesde(ruta: $0) },
+                    centroDelGizmo: estado.centroDelGizmo,
+                    alEmpezarGestoDelGizmo: { estado.empezarGestoDelGizmo() },
+                    alMoverConGizmo: { estado.moverConGizmo(eje: $0, milimetros: $1) },
+                    alGirarConGizmo: { estado.girarConGizmo(eje: $0, grados: $1) }
                 )
                 .contextMenu { menuDelViewport }
                 VStack(spacing: 0) {

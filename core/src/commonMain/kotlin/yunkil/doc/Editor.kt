@@ -1525,6 +1525,86 @@ class Editor(inicial: Documento = Documento.vacio()) {
         }
     }
 
+    /**
+     * Mueve la pieza a lo largo de una dirección **del mundo**, en milímetros.
+     *
+     * Es lo único que sabe decir un gizmo: dibuja una flecha que apunta a X, Y o Z del
+     * mundo y entrega los milímetros que se ha arrastrado por ella. La pieza, en cambio,
+     * guarda su traslación en el marco de su padre, y con un grupo girado los dos marcos no
+     * coinciden: escribir el avance directamente en la traslación movería la pieza por otro
+     * eje, y quien tira de la flecha vería la pieza irse por donde no ha tirado.
+     *
+     * La conversión es geometría, así que se hace aquí y no en la aplicación, que solo pone
+     * píxeles. No se anota en el historial: un arrastre son cien de estas llamadas y son un
+     * solo ⌘Z, que abre y cierra quien maneja el gesto.
+     */
+    fun moverEnElMundo(id: String, x: Float, y: Float, z: Float, milimetros: Float): Boolean {
+        if (documento.buscar(id) == null) return rechazar("No existe la pieza $id")
+        if (!milimetros.isFinite()) return rechazar("El avance no es un número")
+        val direccion = normalizada(Vec3(x, y, z))
+            ?: return rechazar("Esa dirección no apunta a ninguna parte")
+
+        val padre = documento.transformDelPadreDe(id) ?: Transform.IDENTITY
+        val avance = enElMarcoDelPadre(padre, direccion * milimetros)
+        return aplicar(registrarEnHistorial = false) { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(id) {
+                    it.copy(transform = it.transform.copy(translation = it.transform.translation + avance))
+                },
+            )
+        }
+    }
+
+    /**
+     * Gira la pieza alrededor de un eje **del mundo** que pasa por el centro de su caja.
+     *
+     * Por el centro y no por su origen: una pieza cuyo origen esté a 200 mm giraría
+     * describiendo un arco de 200 mm de radio y se iría de la pantalla, cuando lo que se ha
+     * pedido es orientarla. Es de los defectos que se notan a la primera y no se perdonan.
+     *
+     * Igual que [moverEnElMundo], el eje llega en coordenadas del mundo y se traduce al
+     * marco del padre antes de componerlo con la rotación que ya tenía la pieza.
+     */
+    fun girarEnElMundo(id: String, x: Float, y: Float, z: Float, grados: Float): Boolean {
+        if (documento.buscar(id) == null) return rechazar("No existe la pieza $id")
+        if (!grados.isFinite()) return rechazar("El giro no es un número")
+        val eje = normalizada(Vec3(x, y, z)) ?: return rechazar("Ese eje no apunta a ninguna parte")
+
+        val padre = documento.transformDelPadreDe(id) ?: Transform.IDENTITY
+        val giro = Quat.fromAxisAngle(
+            enElMarcoDelPadre(padre, eje), grados * PI.toFloat() / 180f
+        )
+        val matriz = giro.toMatrixRowMajor()
+        // El pivote, dicho también en el marco del padre. Sin caja —una pieza que no
+        // compila— se gira alrededor del origen local, que es lo único que queda.
+        val pivote = documento.cotasEnMundoDe(id)?.center?.let { padre.worldToLocal(it) }
+
+        return aplicar(registrarEnHistorial = false) { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(id) { pieza ->
+                    val t = pieza.transform
+                    pieza.copy(
+                        transform = t.copy(
+                            rotation = (giro * t.rotation).normalized(),
+                            translation = if (pivote == null) t.translation
+                            else pivote + applyMatrix(matriz, t.translation - pivote),
+                        ),
+                    )
+                },
+            )
+        }
+    }
+
+    /** Un vector del mundo, dicho en el marco del padre de una pieza. */
+    private fun enElMarcoDelPadre(padre: Transform, v: Vec3): Vec3 =
+        applyMatrix(padre.rotation.conjugate().toMatrixRowMajor(), v) / padre.scale
+
+    private fun normalizada(v: Vec3): Vec3? {
+        val largo = v.length()
+        if (largo < 1e-6f || !largo.isFinite()) return null
+        return v / largo
+    }
+
     fun renombrar(id: String, nombre: String): Boolean {
         val limpio = nombre.trim()
         if (limpio.isEmpty()) return rechazar("El nombre no puede quedar vacío")
