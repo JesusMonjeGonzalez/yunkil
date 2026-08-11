@@ -177,13 +177,20 @@ verification gates.
 - Advanced prototype without sustained external print validation.
 - macOS/Apple Silicon application only; no finished iPad application.
 - The app harness drives the state layer, not the SwiftUI view tree: layout and rendered controls have no automated coverage.
-- No signed, notarized public release.
+- No signed, notarized public release: that needs an Apple Developer account, not code.
+- An examination costs seconds even on a small part — measured: 9 s on a 14 mm box with a
+  release core — because it samples the surface at nozzle density whatever the part
+  measures. It runs in the background, but it is not something to ask for on every change.
 
 ## Current Focus
 
 1. Validate the calibrated clearance against real prints on real machines.
-2. Sign and notarize a public release.
-3. Bring the fit system to an iPad application.
+2. Bring the organic AI flow level with the parametric one: ghost preview, correction
+   rounds, document review tied to the proposal and a log entry.
+3. Direct selection and editing of organic parts, including grabbing a curve's control
+   points in the viewport.
+
+`docs/technical-overview.md` carries the full ordered list; this is its head.
 
 ## Deep Technical Documentation
 

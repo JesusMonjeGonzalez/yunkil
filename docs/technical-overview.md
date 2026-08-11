@@ -474,7 +474,12 @@ sino cerrar confianza, reproducibilidad e interacción. Añadir formas nuevas qu
    de documento ligada a la propuesta y bitácora.
 2. Selección y modificación directa de partes orgánicas, incluidos los puntos de control
    de una curva agarrados en el viewport.
-3. Ensamblajes ligeros e interferencias, ahora que el gizmo coloca piezas de verdad.
+3. Ensamblajes ligeros e interferencias. **Necesita una decisión de diseño antes que
+   código:** comprobar que dos piezas no se meten una en otra no significa nada en este
+   documento, porque no hay concepto de cuerpo suelto. La raíz es una unión de todo, y dos
+   piezas que se solapan bajo una unión están bien —así es como se construye una pieza—, así
+   que una interferencia solo existe entre cuerpos que deben ensamblar, y eso hoy no se
+   puede decir.
 4. Versionar los perfiles: hoy se calibran, se editan y se guardan, pero una edición pisa
    la anterior y no hay a dónde volver.
 5. Un encaje que gobierne dos cotas independientes. Hoy gobierna la extensión en un eje y
