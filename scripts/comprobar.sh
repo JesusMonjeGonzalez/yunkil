@@ -12,7 +12,9 @@
 #   3. La previsualización fantasma: se dibuja de verdad y se cuentan los píxeles, que
 #      es lo único que dice si lo que se añade sale verde y lo que se quita, rojo.
 #   4. El rayo de la cámara: un signo invertido aquí no da error, da otra pieza.
-#   5. Que la aplicación de escritorio compile y enlace contra el núcleo real.
+#   5. El gizmo: proyectar es la vuelta exacta del rayo, y arrastrar mueve y gira hacia
+#      donde se arrastra. Otro sitio donde un signo no da error, da un gesto al revés.
+#   6. Que la aplicación de escritorio compile y enlace contra el núcleo real.
 #
 #     ./scripts/comprobar.sh          # todo
 #     ./scripts/comprobar.sh nucleo   # solo las pruebas del núcleo, que es lo rápido
@@ -46,6 +48,10 @@ swiftc -O tools/fantasma/main.swift apps/mac/Sources/Camara.swift -o build/fanta
 paso "Rayo de la cámara"
 swiftc -O tools/rayo/main.swift apps/mac/Sources/Camara.swift -o build/rayo-arnes
 ./build/rayo-arnes || fallos=$((fallos + 1))
+
+paso "Gizmo de mover y girar"
+swiftc -O tools/gizmo/main.swift apps/mac/Sources/Camara.swift apps/mac/Sources/Gizmo.swift -o build/gizmo-arnes
+./build/gizmo-arnes || fallos=$((fallos + 1))
 
 paso "Aplicación de escritorio"
 ./scripts/construir-mac.sh debug >/dev/null

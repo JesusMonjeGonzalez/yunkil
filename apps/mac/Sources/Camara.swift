@@ -116,6 +116,32 @@ struct CamaraOrbital {
         return (posicion, direccion)
     }
 
+    /// Dónde cae un punto del mundo en la pantalla, o `nil` si queda detrás.
+    ///
+    /// Es **la vuelta exacta de `rayo`**, y tiene que serlo: el gizmo se dibuja con esto y
+    /// se agarra con lo otro, así que en cuanto las dos cuentas se separen el asa aparecerá
+    /// en un sitio y responderá en otro. Por eso vive pegada a `rayo` y por eso el arnés
+    /// comprueba la ida y la vuelta en perspectiva y en paralela.
+    ///
+    /// - Returns: coordenadas de pantalla en `[-1, 1]` con la Y hacia arriba, las mismas
+    ///   que come `rayo`. Nada de píxeles: quien dibuje sabrá su tamaño.
+    func proyectar(_ punto: SIMD3<Float>, aspecto: Float) -> SIMD2<Float>? {
+        guard aspecto > 0 else { return nil }
+        let base = baseOrtonormal()
+        let v = punto - posicion
+        let profundidad = simd_dot(v, base.frente)
+        // Detrás de la cámara no hay pantalla. En perspectiva además la división
+        // explotaría, y un asa se dibujaría del revés al otro lado del centro.
+        guard profundidad > 1e-4 else { return nil }
+
+        let t = tan(campoDeVision * 0.5)
+        // En paralela la escala no depende de la profundidad; en perspectiva es la
+        // división de siempre. Mismo reparto que hace `rayo` al construirlo.
+        let denominador = ortografica ? distancia : profundidad
+        let ndc = SIMD2<Float>(simd_dot(v, base.derecha), simd_dot(v, base.arriba)) / denominador
+        return SIMD2<Float>(ndc.x / (t * aspecto), ndc.y / t)
+    }
+
     /// Cuánto avanza una cara, en milímetros del mundo, al arrastrar el ratón.
     ///
     /// Es lo que convierte un arrastre en pantalla en un empujón sobre una cota. La cara

@@ -1,10 +1,7 @@
 // Arnés del gizmo de mover y girar.
 //
-// AVISO: esto es la prueba escrita **antes** que la implementación, y `Gizmo.swift`
-// todavía no existe. No compila a propósito y por eso no está en `scripts/comprobar.sh`:
-// es el contrato del que arranca la siguiente tanda, no una comprobación que se esté
-// haciendo. Lo primero al retomarlo es escribir `apps/mac/Sources/Gizmo.swift` hasta que
-// esto pase, y entonces engancharlo al script.
+// Esto se escribió **antes** que `Gizmo.swift`, como contrato del que arrancar. Ya pasa, y
+// ya está enganchado a `scripts/comprobar.sh`.
 //
 // El gizmo no se dibuja en el shader —el renderizador no tiene tubería de vértices—
 // sino proyectando a pantalla, así que toda su geometría es aritmética de cámara que se
