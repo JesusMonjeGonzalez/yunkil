@@ -1349,33 +1349,52 @@ class Editor(inicial: Documento = Documento.vacio()) {
      */
     fun rehornearMallas(): List<String> {
         val perdidas = ArrayList<String>()
-        fun recorrer(pieza: Pieza): Pieza {
-            var actualizada = pieza
-            if (pieza.tipo == TipoPieza.MALLA && pieza.campoDeMalla == null) {
-                val ruta = pieza.rutaDeMalla
-                val bytes = ruta?.let { leerArchivo(it) }
-                val leido = bytes?.let { LectorStl.leer(it) }
-                if (leido is LectorStl.Resultado.Leida && leido.malla.numeroDeTriangulos > 0) {
-                    val tamano = leido.malla.cotas().size
-                    val mayor = maxOf(tamano.x, maxOf(tamano.y, tamano.z))
-                    actualizada = pieza.copy(
-                        campoDeMalla = CampoDeMalla.hornear(
-                            leido.malla.vertices, leido.malla.triangulos,
-                            maxOf(mayor / 120f, 0.05f), origen = ruta,
-                        ),
-                    )
-                } else {
-                    perdidas.add(pieza.nombre)
-                }
+        for (id in mallasSinHornear()) {
+            val ruta = rutaDeMalla(id)
+            val horneada = ruta?.let { hornearMallaDesde(it) }
+            if (horneada is MallaImportada.Lista) {
+                ponerCampoHorneado(id, horneada)
+            } else {
+                perdidas.add(documento.buscar(id)?.nombre ?: id)
             }
-            return actualizada.copy(hijos = actualizada.hijos.map(::recorrer))
         }
-
-        // Se pasa por `aplicar` sin registrar en el historial: rehornear no es una
-        // edición que nadie quiera deshacer, pero sí tiene que recompilar el shader.
-        val nuevaRaiz = recorrer(documento.raiz)
-        aplicar(registrarEnHistorial = false) { it.copy(raiz = nuevaRaiz) }
         return perdidas
+    }
+
+    /**
+     * Las mallas que están en el árbol sin su campo, que son las que hay que hornear.
+     *
+     * Existe para poder hacerlo **fuera del hilo de la interfaz**: abrir un proyecto con dos
+     * STL importados es rasterizar millones de triángulos contra una rejilla, y hasta que
+     * esto se pudo repartir, la ventana se quedaba muerta durante todo el rato. Quien llama
+     * pide los identificadores aquí, hornea cada uno donde quiera —[hornearMallaDesde] no
+     * toca el documento— y vuelve con [ponerCampoHorneado].
+     */
+    fun mallasSinHornear(): List<String> {
+        val pendientes = ArrayList<String>()
+        fun recorrer(pieza: Pieza) {
+            if (pieza.tipo == TipoPieza.MALLA && pieza.campoDeMalla == null) pendientes.add(pieza.id)
+            pieza.hijos.forEach(::recorrer)
+        }
+        recorrer(documento.raiz)
+        return pendientes
+    }
+
+    /** De qué archivo salió una malla importada. */
+    fun rutaDeMalla(id: String): String? = documento.buscar(id)?.rutaDeMalla
+
+    /**
+     * Pone un campo ya horneado en una malla que ya está en el árbol.
+     *
+     * Sin registrar en el historial: rehornear no es una edición que nadie quiera deshacer
+     * —el documento dice lo mismo antes y después—, pero sí tiene que recompilar el shader,
+     * porque el árbol pasa de no tener nada que dibujar a tenerlo.
+     */
+    fun ponerCampoHorneado(id: String, horneada: MallaImportada.Lista): Boolean {
+        if (documento.buscar(id) == null) return rechazar("No existe la pieza $id")
+        return aplicar(registrarEnHistorial = false) { doc ->
+            doc.copy(raiz = doc.raiz.mapear(id) { it.copy(campoDeMalla = horneada.campo) })
+        }
     }
 
     /**

@@ -34,6 +34,19 @@ func conUnaCaja() -> (EstadoDeLaApp, String) {
     return (estado, estado.seleccion)
 }
 
+/// Un documento con una sola caja pequeña: el examen malla a resolución de boquilla, así
+/// que medir el ejemplo de partida entero costaría más que todo el resto del arnés junto.
+@MainActor
+func piezaPequena() -> EstadoDeLaApp {
+    let estado = EstadoDeLaApp()
+    estado.cargarEjemplo("vacio")
+    estado.anadir("CAJA")
+    for (clave, valor) in [("anchura", Float(14)), ("altura", 10), ("profundidad", 12)] {
+        estado.fijarParametro(clave, valor)
+    }
+    return estado
+}
+
 @MainActor
 func arnes() {
 
@@ -176,6 +189,75 @@ func arnes() {
         esperarA({ !estado.importandoMalla }, "el horneado termina")
         comprobar(estado.filas.count == departida, "un archivo que no es un STL no mete pieza en el árbol")
         comprobar((estado.aviso ?? "").contains("STL"), "y el motivo lo dice: \(estado.aviso ?? "sin aviso")")
+    }
+
+    print("\n— abrir un proyecto con mallas —")
+    do {
+        // El caso entero y con archivos de verdad: se exporta un STL, se importa, se guarda
+        // el proyecto y se vuelve a abrir. Los campos horneados no viajan dentro del
+        // `.yunkil` —son megas—, así que al abrir hay que rasterizarlos otra vez, y eso es
+        // lo que congelaba la ventana.
+        let carpeta = NSTemporaryDirectory() + "yunkil-arnes-abrir/"
+        try? FileManager.default.createDirectory(atPath: carpeta, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: carpeta) }
+
+        let stl = carpeta + "pieza.stl"
+        let proyecto = URL(fileURLWithPath: carpeta + "proyecto.yunkil")
+
+        let estado = EstadoDeLaApp()
+        comprobar(estado.editor.exportarStl(ruta: stl, resolucion: 0.8, alAvanzar: nil) != nil, "sale un STL de partida")
+
+        estado.importarMallaDesde(ruta: stl)
+        esperarA({ !estado.importandoMalla }, "la malla de partida se hornea")
+        comprobar(estado.filas.contains { $0.tipo == "MALLA" }, "y entra en el árbol")
+
+        try? estado.editor.aJson().write(to: proyecto, atomically: true, encoding: .utf8)
+
+        let reabierto = EstadoDeLaApp()
+        reabierto.abrirDesde(proyecto)
+        comprobar(reabierto.filas.contains { $0.tipo == "MALLA" }, "el proyecto se abre con su malla en el árbol")
+        comprobar(reabierto.importandoMalla, "y el horneado arranca fuera del hilo: la ventana no se queda muerta")
+
+        esperarA({ !reabierto.importandoMalla }, "los campos acaban de caer")
+        comprobar(!reabierto.editor.estaVacio, "y la pieza importada vuelve a tener material que dibujar")
+    }
+
+    print("\n— un informe no puede ser de otra pieza —")
+    do {
+        // Sin esperar un examen entero a propósito: medir una caja de 14 mm cuesta nueve
+        // segundos con el núcleo en release y treinta y cinco en depuración, y este guion se
+        // lanza a cada rato. Lo que puede romperse al refactorizar es **la decisión** de
+        // tirar un informe caducado, así que se comprueba esa, con el mismo predicado que
+        // usa la tarea de verdad.
+        let (estado, _) = conUnaCaja()
+        let copia = estado.editor.aJson()
+        let perfil = estado.perfilDeFabricacion
+
+        comprobar(
+            estado.elInformeSigueValiendo(documento: copia, perfil: perfil),
+            "sin tocar nada, lo medido sigue siendo lo que hay delante"
+        )
+
+        estado.fijarParametro("anchura", 71)
+        comprobar(
+            !estado.elInformeSigueValiendo(documento: copia, perfil: perfil),
+            "mover una cota mientras se examina invalida el informe que venía"
+        )
+
+        let otro = estado.perfilesDisponibles.first { $0 != perfil }!
+        let despues = estado.editor.aJson()
+        estado.fijarPerfil(otro)
+        comprobar(
+            !estado.elInformeSigueValiendo(documento: despues, perfil: perfil),
+            "y cambiar de impresora también: el informe cita umbrales de la anterior"
+        )
+    }
+
+    do {
+        // Y que la tarea arranca de verdad fuera del hilo, que es la otra mitad.
+        let (estado, _) = conUnaCaja()
+        estado.analizarFabricacion()
+        comprobar(estado.analizando, "el examen arranca en otro hilo")
     }
 
     // ------------------------------------------------------------ calibrar

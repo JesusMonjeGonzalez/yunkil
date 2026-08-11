@@ -251,17 +251,21 @@ apps/mac/Sources/
 ├── App.swift
 ├── Renderizador.swift
 ├── Camara.swift
+├── Gizmo.swift
 ├── Gobernador.swift
 ├── AIService.swift
 ├── PanelDePropuesta.swift
 ├── CriticaVisual.swift
 └── EditorVisualDePerfil.swift
 
+core/src/macosArm64Main/  `yunkil`, la orden de terminal: el mismo núcleo sin ventana
+
 tools/
 ├── paridad/      arnés CPU ↔ Metal
 ├── fantasma/     arnés de la previsualización
 ├── rayo/         arnés del rayo de cámara
-└── gizmo/        escrito, todavía sin ejecutar por `comprobar.sh`
+├── gizmo/        arnés del gizmo: proyectar, agarrar, mover y girar
+└── estado/       arnés de la aplicación: conduce `EstadoDeLaApp` sin abrir ventana
 ```
 
 ### Invariantes
@@ -354,7 +358,8 @@ Requisitos: macOS 14+, Apple Silicon, JDK 21, Xcode/Command Line Tools y Metal.
 ```bash
 ./scripts/instalar.sh                 # construye e instala en /Applications
 ./scripts/construir-mac.sh debug      # genera build/Yunkil.app
-./scripts/comprobar.sh                # núcleo, CPU/Metal, fantasma, rayo y app
+./scripts/construir-cli.sh instalar   # `yunkil` en ~/.local/bin
+./scripts/comprobar.sh                # núcleo, CPU/Metal, fantasma, rayo, gizmo, app y orden
 ./scripts/comprobar.sh nucleo         # pruebas rápidas del núcleo
 ./gradlew :core:jvmTest               # pruebas Kotlin/JVM
 ./gradlew :core:banco                 # banco IA local; informativo, no bloquea
@@ -405,14 +410,13 @@ ni documentos.
 
 - El editor visual de perfiles solo manipula segmentos rectos; arcos y Bézier existen en el
   núcleo pero no tienen edición visual completa.
-- No hay todavía gizmo visible para mover y girar. `tools/gizmo/` es un arnés escrito por
-  delante de la función: `comprobar.sh` no lo ejecuta y no comprueba nada hoy. Un arnés que
-  no corre parece cobertura sin serlo, así que o entra en el guion cuando exista el gizmo o
-  se borra.
-- Los perfiles de fabricación son constantes verificadas; no tienen editor, persistencia,
-  calibración ni versión propia. Sin cupón de calibración, `OrigenDelPerfil.CALIBRADO` no
-  lo produce nada y todas las holguras siguen siendo de fábrica: Yunkil garantiza que la
-  geometría tiene la holgura declarada, no que esa holgura sea la buena para tu máquina.
+- El gizmo mueve y gira, pero no escala, no resalta el asa al pasar el ratón —no tiene área
+  de seguimiento— y no ofrece ajuste por incrementos al arrastrar con ⇧.
+- Los perfiles se calibran con el cupón y se guardan, pero no se editan umbral a umbral ni
+  tienen versión propia: se puede cambiar la holgura midiendo, no la boquilla ni el voladizo
+  a mano. Y ninguna holgura calibrada se ha contrastado todavía con impresiones sostenidas,
+  así que Yunkil garantiza que la geometría tiene la holgura declarada; que esa holgura sea
+  la buena para tu máquina depende de lo bien que hayas leído tu cupón.
 - Un encaje gobierna la extensión de la pieza en **un** eje y la ajusta escalando
   uniformemente, así que atar el diámetro de un cilindro también mueve su altura. Es
   coherente con la escala uniforme del resto del sistema, pero significa que una pieza que
@@ -440,13 +444,13 @@ ni documentos.
 - La simetría refleja el brochazo al pintarlo; no obliga a que la figura entera sea
   simétrica ni refleja lo esculpido antes de fijar el plano.
 - No hay reconstrucción neuronal, retopología, materiales, color, rigging ni animación.
-- Importar una malla y rehornearla al abrir corren en el hilo principal: la aplicación se
-  queda quieta mientras rasteriza los triángulos contra la rejilla. Se avisa antes para que
-  no parezca colgada, pero avisar no es no bloquear. El análisis, en cambio, sí corre
-  aparte sobre una copia del documento; lo que le falta es comprobar al terminar que el
-  documento sigue siendo el que midió.
-- No hay ni una prueba automatizada de la aplicación macOS. `comprobar.sh` la construye y
-  verifica paridad, fantasma y rayo de cámara, pero nada de lo que hay en `App.swift`.
+- El examen de fabricación cuesta segundos incluso en una pieza pequeña —medido: nueve con
+  el núcleo en release sobre una caja de 14 mm—, porque muestrea la superficie a densidad de
+  boquilla mida lo que mida la pieza. Corre en segundo plano y avisa del progreso, pero no
+  es una operación que se pueda pedir a cada cambio.
+- El arnés de la aplicación conduce el estado, no la interfaz: `tools/estado` comprueba qué
+  se selecciona, qué gesto abre un punto de deshacer y cuándo se ofrece un asa, pero de la
+  disposición y los controles dibujados no hay nada automatizado.
 - `App.swift` y `Editor.kt` concentran demasiadas responsabilidades y deben dividirse por
   dominio sin duplicar estado.
 - Falta validación sostenida mediante impresiones externas y perfiles calibrados por máquina.
@@ -457,41 +461,38 @@ Orden obligatorio hasta que este README cambie. El orden de lo que sigue al punt
 de una auditoría externa cuya tesis se acepta: el salto siguiente no es añadir primitivas,
 sino cerrar confianza, reproducibilidad e interacción. Añadir formas nuevas queda detrás.
 
-0. **Perfiles de fabricación persistentes.** Un perfil calibrado con el cupón vive hoy en
-   memoria y muere al cerrar la aplicación, así que calibrar no sirve todavía de nada. Es
-   lo único que queda entre «la geometría tiene la holgura que declaraste» y «esta pieza
-   entra en tu máquina». Es pequeño: serializar la lista y escribirla junto al resto de
-   ajustes.
-
-1. Que importar y rehornear una malla no bloqueen la interfaz. El análisis ya corre fuera
-   del hilo principal sobre una copia, pero al terminar no comprueba que el documento
-   siga siendo el que midió, así que puede pintar un informe de otra pieza.
-2. Pruebas automatizadas de la aplicación macOS. Hoy `comprobar.sh` la construye y prueba
-   la paridad, el fantasma y el rayo de cámara, pero no hay ni una prueba de la app.
-3. Igualar el flujo orgánico de IA al paramétrico: fantasma, revisión por rondas, revisión
+0. **Validación con impresiones reales.** Es lo único que queda entre «la geometría tiene la
+   holgura que declaraste» y «esta pieza entra en tu máquina». La cadena de código está
+   entera —cupón, holgura medida, perfil guardado y activo—; falta imprimir cupones en
+   máquinas distintas, medirlos y comprobar que la holgura que sale encaja de verdad.
+1. Igualar el flujo orgánico de IA al paramétrico: fantasma, revisión por rondas, revisión
    de documento ligada a la propuesta y bitácora.
-4. Decir cuándo la crítica visual no ha llegado a mirar la pieza. Que falle abierta es
+2. Decir cuándo la crítica visual no ha llegado a mirar la pieza. Que falle abierta es
    deliberado —es un revisor de más, y uno que se cae no puede tumbar un plan que los
    revisores exactos ya aprobaron—, pero hoy no se distingue «la ha visto y le parece
    bien» de «no ha podido verla».
-5. Selección y modificación directa de partes orgánicas, incluidos los puntos de control
+3. Selección y modificación directa de partes orgánicas, incluidos los puntos de control
    de una curva agarrados en el viewport.
-6. Gizmo de mover/girar, ensamblajes ligeros e interferencias.
-7. Editar y versionar perfiles a mano, más allá de guardarlos (prioridad 0) y de
-   calibrarlos con el cupón, que ya funciona.
-8. Validación con impresiones reales y perfiles calibrados por máquina.
-9. Editor visual de perfiles con líneas, arcos, Bézier, cotas y restricciones.
-10. Curvas en el DSL paramétrico, para cables, latiguillos y guías técnicas.
-11. Reconstrucción multivista propia y backend Core ML/Metal para imagen a geometría.
-12. SVG y texto paramétrico como perfiles multicontorno.
-13. Pintado de las zonas protegidas en el viewport.
-14. División automática de figuras, pasadores, huecos de resina y multicolor.
-15. Puente Bambu: 3MF multiobjeto con plato y ajustes por pieza, y abrir directamente en
+4. Terminar el gizmo —escala, resalte al pasar el ratón y ajuste por incrementos— y de ahí
+   a ensamblajes ligeros e interferencias.
+5. Editar y versionar perfiles a mano, más allá de calibrarlos con el cupón y guardarlos,
+   que ya funciona.
+6. Un encaje que gobierne dos cotas independientes. Hoy gobierna la extensión en un eje y
+   la ajusta escalando uniformemente, así que atar el diámetro de un cilindro le mueve la
+   altura; es coherente con la escala uniforme del sistema y aun así deja fuera media
+   mecánica.
+7. Editor visual de perfiles con líneas, arcos, Bézier, cotas y restricciones.
+8. Curvas en el DSL paramétrico, para cables, latiguillos y guías técnicas.
+9. Reconstrucción multivista propia y backend Core ML/Metal para imagen a geometría.
+10. SVG y texto paramétrico como perfiles multicontorno.
+11. Pintado de las zonas protegidas en el viewport.
+12. División automática de figuras, pasadores, huecos de resina y multicolor.
+13. Puente Bambu: 3MF multiobjeto con plato y ajustes por pieza, y abrir directamente en
     Bambu Studio. Hoy el 3MF lleva un solo objeto, así que una pieza y su cupón de
     calibración no pueden salir en la misma placa. Va detrás de lo anterior a propósito:
     es fontanería y no responde a por qué abrir Yunkil, que es lo que responden los
     encajes.
-16. Después: 3MF comprimido e iPad con render por tiles.
+14. Después: 3MF comprimido e iPad con render por tiles.
 
 No se persigue replicar render, animación, rigging o composición de Blender. La ventaja de
 Yunkil debe ser generar, editar semánticamente y certificar piezas técnicas y figuras

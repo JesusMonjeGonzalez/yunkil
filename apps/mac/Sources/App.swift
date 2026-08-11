@@ -2093,12 +2093,31 @@ final class EstadoDeLaApp: ObservableObject {
             let resultado = aislado.analizarFabricacion(nombrePerfil: perfil, alAvanzar: nil)
             let candidatas = aislado.orientacionesDeImpresion(nombrePerfil: perfil)
             await MainActor.run {
+                self.analizando = false
+                guard self.elInformeSigueValiendo(documento: copia, perfil: perfil) else {
+                    self.informe = nil
+                    self.orientaciones = []
+                    self.aviso = "La pieza cambió mientras se examinaba. Vuelve a analizarla."
+                    return
+                }
                 self.informe = resultado
                 self.orientaciones = candidatas
-                self.analizando = false
                 if resultado == nil { self.aviso = aislado.ultimoError }
             }
         }
+    }
+
+    /// ¿Lo que acaba de medirse sigue siendo lo que hay delante?
+    ///
+    /// El examen tarda segundos y mide una **copia** del documento. Si mientras tanto se ha
+    /// movido una cota o se ha cambiado de impresora, lo que vuelve es el informe de otra
+    /// pieza. Y un informe que dice «apta» sobre algo que ya no existe es peor que no tener
+    /// informe: es el único sitio del producto donde el usuario confía sin volver a mirar.
+    ///
+    /// Está separado de la tarea para poder comprobarlo sin esperar un examen entero: lo que
+    /// puede romperse aquí es la decisión, no la aritmética que la precede.
+    func elInformeSigueValiendo(documento: String, perfil: String) -> Bool {
+        documento == editor.aJson() && perfil == perfilDeFabricacion
     }
 
     /// Ejecuta el arreglo que propone un aviso. Entra en el historial como todo.
@@ -2164,6 +2183,43 @@ final class EstadoDeLaApp: ObservableObject {
         }
     }
 
+    /// Vuelve a hornear las mallas de un proyecto recién abierto, sin congelar la ventana.
+    ///
+    /// Los campos no viajan dentro del `.yunkil` —son megas—, así que al abrir llegan vacíos
+    /// y hay que rasterizar otra vez cada STL contra su rejilla. Con dos piezas importadas
+    /// eso eran varios segundos con la aplicación muerta. Ahora el documento se enseña
+    /// primero, aunque sus mallas todavía no se vean, y los campos van cayendo: se ve
+    /// aparecer la pieza, que es lo contrario de parecer colgada.
+    ///
+    /// Si alguna no está donde estaba se dice cuál, en vez de dejar un hueco callado.
+    private func rehornearLoQueFalte() {
+        let pendientes = editor.mallasSinHornear()
+        guard !pendientes.isEmpty else { return }
+        importandoMalla = true
+
+        // Cada una en su vuelta: colocar un campo en cuanto está listo enseña la primera
+        // pieza mientras se hornea la segunda.
+        Task.detached(priority: .userInitiated) {
+            let aislado = Editor(inicial: Documento.companion.vacio())
+            for id in pendientes {
+                let ruta = await MainActor.run { self.editor.rutaDeMalla(id: id) }
+                let horneada = ruta.map { aislado.hornearMallaDesde(ruta: $0, resolucion: 0) }
+                await MainActor.run { self.ponerCampo(id: id, horneada) }
+            }
+            await MainActor.run { self.importandoMalla = false }
+        }
+    }
+
+    private func ponerCampo(id: String, _ horneada: MallaImportada?) {
+        guard let lista = horneada as? MallaImportadaLista else {
+            let nombre = editor.nombreDe(id: id)
+            aviso = "No se encontró el archivo de «\(nombre)»: esa pieza queda vacía."
+            return
+        }
+        _ = editor.ponerCampoHorneado(id: id, horneada: lista)
+        refrescar(recompilo: true)
+    }
+
     private func colocar(_ horneada: MallaImportada) {
         importandoMalla = false
         guard let lista = horneada as? MallaImportadaLista else {
@@ -2188,21 +2244,25 @@ final class EstadoDeLaApp: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [UTType(filenameExtension: "yunkil") ?? .json]
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        abrirDesde(url)
+    }
+
+    /// Abrir, separado del diálogo que elige el archivo.
+    ///
+    /// Están separados para poder conducirlo sin ventana: un `NSOpenPanel` no se puede
+    /// contestar desde un arnés, y abrir un proyecto es justo donde vive el rehorneado.
+    func abrirDesde(_ url: URL) {
         do {
             let texto = try String(contentsOf: url, encoding: .utf8)
-            if editor.desdeJson(texto: texto) {
-                // Las mallas importadas no viajan dentro del proyecto —son megas— así
-                // que al abrir se vuelven a hornear desde su archivo original. Si
-                // alguna se movió de sitio se dice cuál, en vez de dejar un hueco.
-                let perdidas = editor.rehornearMallas()
-                if !perdidas.isEmpty {
-                    aviso = "No se encontraron los archivos de: \(perdidas.joined(separator: ", "))"
-                }
-                refrescar(recompilo: true)
-                renderizador?.encuadrar()
-            } else {
+            guard editor.desdeJson(texto: texto) else {
                 aviso = editor.ultimoError
+                return
             }
+            // Se enseña ya, aunque las mallas todavía no estén: ver el documento y que sus
+            // piezas importadas vayan apareciendo es lo contrario de una ventana muerta.
+            refrescar(recompilo: true)
+            renderizador?.encuadrar()
+            rehornearLoQueFalte()
         } catch {
             aviso = "No se pudo abrir: \(error.localizedDescription)"
         }
