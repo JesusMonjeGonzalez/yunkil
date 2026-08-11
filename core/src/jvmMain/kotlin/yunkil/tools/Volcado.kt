@@ -11,13 +11,17 @@ import yunkil.kernel.Cordon
 import yunkil.kernel.Diferencia
 import yunkil.kernel.Desfase
 import yunkil.kernel.Esfera
+import yunkil.kernel.Extrusion
 import yunkil.kernel.Interseccion
 import yunkil.kernel.ModoDeAcuerdo
 import yunkil.kernel.MoverLocal
 import yunkil.kernel.PellizcoLocal
+import yunkil.kernel.Perfil2D
 import yunkil.kernel.PerfilDeAcuerdo
+import yunkil.kernel.Punto2
 import yunkil.kernel.Quat
 import yunkil.kernel.Repeticion
+import yunkil.kernel.Revolucion
 import yunkil.kernel.RepeticionCircular
 import yunkil.kernel.SdfNode
 import yunkil.kernel.Simetria
@@ -223,6 +227,15 @@ private fun casos(): List<Pair<String, SdfNode>> = listOf(
         fusion = 2.5f,
         perfil = PerfilDeAcuerdo.CHAFLAN,
     ),
+
+    // El perfil poligonal, que no tenía ni un caso y es la función más larga del
+    // preludio: la única con un bucle sobre los uniforms y la única con una excepción
+    // —la arista que cae sobre el eje de revolución no cuenta para la distancia—. Esa
+    // excepción existe en dos sitios, Kotlin y MSL, así que hacen falta los tres casos:
+    // sin eje, con el contorno tocándolo y con el eje desplazado fuera del perfil.
+    "extrusion_perfil" to Extrusion(contornoDeVaso(), altura = 6f),
+    "revolucion_al_eje" to Revolucion(contornoDeVaso(), 0f),
+    "revolucion_desplazada" to Revolucion(Perfil2D.rectangulo(4f, 4f), desplazamiento = 12f),
 
     "transformado" to Transformado(
         Caja(Vec3(10f, 4f, 6f)),
@@ -511,3 +524,11 @@ private fun campoDeCubo(lado: Float, resolucion: Float): yunkil.kernel.CampoDeMa
 
 private fun desplazada(n: SdfNode, x: Float) =
     Transformado(n, Transform(translation = Vec3(x, 0f, 0f)))
+
+/** Un contorno de pieza torneada: pie ancho, vástago, y cierre por el propio eje. */
+private fun contornoDeVaso() = Perfil2D.poligono(
+    listOf(
+        Punto2(0f, 0f), Punto2(8f, 0f), Punto2(8f, 1.6f),
+        Punto2(4f, 1.6f), Punto2(4f, 15f), Punto2(0f, 15f),
+    ),
+)

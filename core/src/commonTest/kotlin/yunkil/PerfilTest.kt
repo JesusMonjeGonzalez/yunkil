@@ -182,6 +182,32 @@ class PerfilTest {
     }
 
     @Test
+    fun `en el eje de una pieza maciza torneada el campo mide hasta la pared`() {
+        // El contorno cierra por el propio eje —lo hace cualquier pieza maciza de
+        // torno—, y esa arista de cierre no es superficie: al girar se colapsa en el
+        // eje. Contándola, el campo valía cero justo en el eje y el mallador veía allí
+        // un cambio de signo donde no hay nada, con astillas que hacían que el
+        // certificado se negara a exportar. Lo que tiene que medirse desde el eje es la
+        // distancia a la pared de verdad.
+        val vaso = Revolucion(
+            Perfil2D.poligono(
+                listOf(
+                    Punto2(0f, 0f), Punto2(8f, 0f), Punto2(8f, 1.6f),
+                    Punto2(4f, 1.6f), Punto2(4f, 15f), Punto2(0f, 15f),
+                ),
+            ),
+            0f,
+        )
+        // A media altura del vástago: 4 mm hasta la pared, y dentro.
+        assertTrue(abs(vaso.evaluar(Vec3(0f, 8f, 0f)) + 4f) < 1e-3f, "en el eje: ${vaso.evaluar(Vec3(0f, 8f, 0f))}")
+        // En el pie, lo más cerca está el propio suelo.
+        assertTrue(abs(vaso.evaluar(Vec3(0f, 0.5f, 0f)) + 0.5f) < 1e-3f, "en el pie")
+        // Y fuera sigue midiendo lo de siempre.
+        assertTrue(vaso.evaluar(Vec3(0f, 16f, 0f)) > 0.9f, "por encima de la boca")
+        assertTrue(vaso.evaluar(Vec3(6f, 8f, 0f)) > 1.9f, "al lado del vástago")
+    }
+
+    @Test
     fun `el volumen de una extrusion coincide con area por altura`() {
         // Comprobación independiente: el campo se malla y se mide, y tiene que dar
         // lo mismo que la geometría analítica del contorno.

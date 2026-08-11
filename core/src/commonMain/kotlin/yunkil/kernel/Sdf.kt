@@ -423,8 +423,13 @@ data class Revolucion(
     val desplazamiento: Float = 0f,
 ) : SdfNode {
 
+    /**
+     * El eje cae en `x = -desplazamiento` del perfil: ahí es donde el radio vale cero.
+     * Se lo dice al perfil para que no cuente como superficie lo que al girar se
+     * colapsa sobre el propio eje. Ver [Perfil2D.evaluar].
+     */
     override fun evaluar(p: Vec3): Float =
-        perfil.evaluar(Punto2(length2(p.x, p.z) - desplazamiento, p.y))
+        perfil.evaluar(Punto2(length2(p.x, p.z) - desplazamiento, p.y), -desplazamiento)
 
     override fun cotas(): Aabb {
         val (lo, hi) = perfil.cotas()

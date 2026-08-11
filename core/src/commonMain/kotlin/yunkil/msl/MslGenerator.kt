@@ -422,7 +422,7 @@ class MslGenerator {
                 val v = e.nuevaVariable("ex")
                 // El perfil vive en XZ, que es el plano del plato: se dibuja sobre la
                 // mesa y se levanta.
-                sb.append("${sangria}float ${v}p = yk_perfil(float2($punto.x, $punto.z), u, ${b + 3}, ${nodo.perfil.poligono.size}, ${u(2)});\n")
+                sb.append("${sangria}float ${v}p = yk_perfil(float2($punto.x, $punto.z), u, ${b + 3}, ${nodo.perfil.poligono.size}, ${u(2)}, YK_SIN_EJE);\n")
                 sb.append("${sangria}float ${v}d = ${v}p + ${u(1)};\n")
                 sb.append("${sangria}float ${v}y = abs($punto.y) - ${u(0)} * 0.5f + ${u(1)};\n")
                 sb.append("${sangria}float $d = min(max(${v}d, ${v}y), 0.0f) + length(max(float2(${v}d, ${v}y), float2(0.0f))) - ${u(1)};\n")
@@ -492,7 +492,7 @@ class MslGenerator {
             is Revolucion -> {
                 val v = e.nuevaVariable("rv")
                 sb.append("${sangria}float2 ${v}q = float2(length($punto.xz) - ${u(0)}, $punto.y);\n")
-                sb.append("${sangria}float $d = yk_perfil(${v}q, u, ${b + 2}, ${nodo.perfil.poligono.size}, ${u(1)});\n")
+                sb.append("${sangria}float $d = yk_perfil(${v}q, u, ${b + 2}, ${nodo.perfil.poligono.size}, ${u(1)}, -${u(0)});\n")
             }
 
             is Cilindro -> {
@@ -984,14 +984,24 @@ class MslGenerator {
             // Tope de vértices de un cordón. Coincide con Cordon.MAXIMO_DE_PUNTOS.
             constant int YK_MAX_CORDON = 64;
 
+            // Perfil que no gira, y tolerancia del eje. Copian Perfil2D.SIN_EJE y
+            // Perfil2D.TOLERANCIA_DEL_EJE: el mismo número a los dos lados o no hay paridad.
+            constant float YK_SIN_EJE = 3.4e38f;
+            constant float YK_TOLERANCIA_EJE = 1e-5f;
+
             // Distancia con signo a un polígono cerrado cuyos vértices vienen en el
             // buffer de uniforms a partir de `base`, en pares (x, y).
             //
             // El signo sale de contar cruces de un rayo horizontal, no del sentido de
             // giro del contorno: así un perfil escrito al revés no invierte el sólido.
-            inline float yk_perfil(float2 p, constant float *u, int base, int n, float redondeo) {
-                float2 v0 = float2(u[base], u[base + 1]);
-                float mejor = dot(p - v0, p - v0);
+            // `xEje` es la abscisa del eje de revolución, o YK_SIN_EJE si el perfil no
+            // gira. Las aristas que caen enteras sobre esa vertical no cuentan para la
+            // distancia: al girar se colapsan en el eje y no barren superficie alguna.
+            // Es la misma excepción que hace Perfil2D.evaluar, y tiene que serlo:
+            // si aquí y allí no sale el mismo número, el visor enseña una pieza y el
+            // analizador razona sobre otra.
+            inline float yk_perfil(float2 p, constant float *u, int base, int n, float redondeo, float xEje) {
+                float mejor = 3.4e38f;
                 bool dentro = false;
                 for (int i = 0; i < YK_MAX_VERTICES; ++i) {
                     if (i >= n) break;
@@ -999,11 +1009,15 @@ class MslGenerator {
                     float2 a = float2(u[base + i * 2], u[base + i * 2 + 1]);
                     float2 b = float2(u[base + j * 2], u[base + j * 2 + 1]);
 
-                    float2 arista = b - a;
-                    float2 hacia = p - a;
-                    float t = clamp(dot(hacia, arista) / max(dot(arista, arista), 1e-20f), 0.0f, 1.0f);
-                    float2 cercano = hacia - arista * t;
-                    mejor = min(mejor, dot(cercano, cercano));
+                    bool enElEje = xEje != YK_SIN_EJE &&
+                        abs(a.x - xEje) <= YK_TOLERANCIA_EJE && abs(b.x - xEje) <= YK_TOLERANCIA_EJE;
+                    if (!enElEje) {
+                        float2 arista = b - a;
+                        float2 hacia = p - a;
+                        float t = clamp(dot(hacia, arista) / max(dot(arista, arista), 1e-20f), 0.0f, 1.0f);
+                        float2 cercano = hacia - arista * t;
+                        mejor = min(mejor, dot(cercano, cercano));
+                    }
 
                     if ((a.y > p.y) != (b.y > p.y)) {
                         float x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x);

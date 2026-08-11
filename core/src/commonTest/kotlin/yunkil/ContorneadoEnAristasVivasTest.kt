@@ -36,8 +36,10 @@ import kotlin.test.assertTrue
  * Partir por la **diagonal más corta** lo arregla, y lo eligen igual los dos vecinos porque
  * depende solo de la geometría de la cara.
  *
- * Queda un defecto distinto, y aquí también está acotado: una revolución cuyo contorno
- * toca el eje deja astillas en el eje.
+ * Había un segundo defecto, y era de otra clase: no de mallado sino del campo. Una
+ * revolución cuyo contorno cierra por el eje contaba esa arista de cierre como superficie,
+ * y desde el eje medía cero en vez de medir hasta la pared. Se arregló en el perfil, que es
+ * donde estaba: al girar, una arista sobre el eje no barre nada.
  */
 class ContorneadoEnAristasVivasTest {
 
@@ -82,16 +84,18 @@ class ContorneadoEnAristasVivasTest {
     }
 
     @Test
-    fun `una revolucion cuyo contorno toca el eje deja astillas en el eje`() {
-        // Defecto **distinto** del anterior y todavía sin arreglar. Cuando el contorno
-        // llega a x = 0 el sólido se cierra sobre el eje, y ahí el campo no tiene una
-        // normal definida: las celdas del eje colocan sus vértices prácticamente en el
-        // mismo punto —se han medido separaciones de 4·10⁻⁷ mm— y salen astillas que se
-        // cruzan entre sí. No tiene que ver con la arista viva: el mismo escalón
-        // construido con una unión sale limpio a todas las resoluciones.
+    fun `una revolucion cuyo contorno toca el eje tampoco se cruza`() {
+        // Este era el segundo defecto, y era de otra clase: no de mallado, sino del
+        // campo. El contorno cierra por el propio eje, y esa arista de cierre se estaba
+        // contando como superficie; el campo valía cero justo en el eje, el mallador
+        // veía allí un cambio de signo donde no hay nada y ponía cuatro vértices casi en
+        // el mismo punto —se midieron separaciones de 4·10⁻⁷ mm— con astillas que se
+        // cruzaban entre sí. Solo aparecía a las resoluciones en las que la rejilla cae
+        // justo sobre el eje, que es lo que lo hacía difícil de ver.
         //
-        // Cuando alguien lo arregle, esta prueba fallará. Entonces hay que borrarla y
-        // quitar el límite del README, no relajarla.
+        // Al girar, esa arista no barre superficie: se colapsa en el eje. Desde que el
+        // perfil lo sabe —Perfil2D.evaluar con el eje de revolución—, desde el eje se
+        // mide hasta la pared de verdad.
         val revolucion = Revolucion(
             Perfil2D.poligono(
                 listOf(
@@ -101,15 +105,9 @@ class ContorneadoEnAristasVivasTest {
             ),
             0f,
         )
-        val fallan = resoluciones.filter { cruces(revolucion, it) > 0 }
-        assertTrue(
-            fallan.isNotEmpty(),
-            "la revolución sobre el eje ya no se cruza: arreglado, borra esta prueba",
-        )
-        assertTrue(
-            fallan.size < resoluciones.size,
-            "ahora se cruza a todas las resoluciones; antes solo a algunas",
-        )
+        for (r in resoluciones) {
+            assertEquals(0, cruces(revolucion, r), "la revolución se cruza a $r mm")
+        }
     }
 
     @Test

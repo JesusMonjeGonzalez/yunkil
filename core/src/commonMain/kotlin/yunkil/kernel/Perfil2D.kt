@@ -146,23 +146,33 @@ data class Perfil2D(
      * el número de cruces del rayo horizontal, no el sentido de giro. Así un
      * perfil dibujado al revés no sale del revés, que es el error que más se
      * comete al escribir coordenadas a mano.
+     *
+     * @param xDelEje abscisa del eje de revolución, o [SIN_EJE] si el perfil no va a
+     *   girar. Las aristas que caen enteras sobre esa vertical **no cuentan para la
+     *   distancia**: al girar no barren superficie, se colapsan en el propio eje. Sin
+     *   esta excepción, un perfil que llega al eje —lo normal en cualquier pieza
+     *   maciza torneada— mide cero justo en el eje, y ahí el mallador ve un cambio de
+     *   signo donde no hay superficie y suelta astillas. Siguen contando para la
+     *   paridad del rayo, que es lo que dice si el punto está dentro.
      */
-    fun evaluar(p: Punto2): Float {
+    fun evaluar(p: Punto2, xDelEje: Float = SIN_EJE): Float {
         val n = poligono.size
         if (n < 3) return Float.MAX_VALUE
 
-        var distanciaCuadrado = (p - poligono[0]).let { it.punto(it) }
+        var distanciaCuadrado = Float.MAX_VALUE
         var dentro = false
 
         for (i in 0 until n) {
             val a = poligono[i]
             val b = poligono[(i + 1) % n]
 
-            val arista = b - a
-            val hacia = p - a
-            val t = (hacia.punto(arista) / max(arista.punto(arista), 1e-20f)).coerceIn(0f, 1f)
-            val cercano = hacia - arista * t
-            distanciaCuadrado = min(distanciaCuadrado, cercano.punto(cercano))
+            if (!enElEje(a, b, xDelEje)) {
+                val arista = b - a
+                val hacia = p - a
+                val t = (hacia.punto(arista) / max(arista.punto(arista), 1e-20f)).coerceIn(0f, 1f)
+                val cercano = hacia - arista * t
+                distanciaCuadrado = min(distanciaCuadrado, cercano.punto(cercano))
+            }
 
             // Cruce del rayo horizontal hacia +x: cada arista que lo cruza cambia
             // la paridad. Comparar con `!=` evita contar dos veces un vértice.
@@ -175,6 +185,10 @@ data class Perfil2D(
         val d = sqrt(distanciaCuadrado)
         return (if (dentro) -d else d) - redondeo
     }
+
+    private fun enElEje(a: Punto2, b: Punto2, xDelEje: Float): Boolean =
+        xDelEje != SIN_EJE && abs(a.x - xDelEje) <= TOLERANCIA_DEL_EJE &&
+            abs(b.x - xDelEje) <= TOLERANCIA_DEL_EJE
 
     // ------------------------------------------------------------------ teselado
 
@@ -318,6 +332,18 @@ data class Perfil2D(
         const val TOLERANCIA = 0.01f
         const val MAXIMO_DE_VERTICES = 256
         const val MAXIMO_POR_CURVA = 128
+
+        /** El perfil no gira: ninguna arista se colapsa y todas cuentan. */
+        const val SIN_EJE = 3.4e38f
+
+        /**
+         * Cuánto puede separarse del eje una arista y seguir contando como suya.
+         *
+         * 10 nm: cuatro órdenes de magnitud por debajo de lo que imprime una boquilla,
+         * así que ninguna pared real cae dentro, y muy por encima del ruido que dejan
+         * el teselado de un arco o el ida y vuelta a JSON.
+         */
+        const val TOLERANCIA_DEL_EJE = 1e-5f
 
         // -------------------------------------------------------------- catálogo
 

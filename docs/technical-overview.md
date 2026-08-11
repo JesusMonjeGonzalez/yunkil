@@ -267,6 +267,9 @@ tools/
 - Cada cara del contorneado se parte por su diagonal más corta. Depende solo de la
   geometría de la cara, así que dos celdas vecinas eligen igual y sus mitades no se pliegan
   una contra otra.
+- Una arista del perfil que cae sobre el eje de revolución no cuenta para la distancia: al
+  girar se colapsa en el eje y no barre superficie. Sin la excepción, cualquier pieza maciza
+  de torno medía cero en su propio eje y el mallador ponía allí astillas.
 - Un nodo que no sea 1-Lipschitz publica su cota de gradiente, y el paso de trazado sale
   de ella tanto en Metal como en el picking en CPU.
 - La escala es uniforme: una escala no uniforme invalidaría las distancias y el analizador.
@@ -413,14 +416,6 @@ ni documentos.
 - Las medidas del mundo se dan de alta con procedencia `a ojo` cuando las escribe la IA:
   al modelo se lo han dicho, no lo ha medido. Subirlas a `con calibre` es cosa de quien
   midió, y hoy solo se puede hacer desde el núcleo, no desde la interfaz.
-- Una **revolución cuyo contorno toca el eje** deja astillas en el eje. Cuando el contorno
-  llega a x = 0 el sólido se cierra sobre sí mismo y ahí el campo no tiene normal definida:
-  las celdas del eje colocan sus vértices prácticamente en el mismo punto —medido: 4·10⁻⁷
-  mm de separación— y salen triángulos degenerados que se cruzan entre sí, a unas
-  resoluciones sí y a otras no. No tiene nada que ver con las aristas vivas, que ya están
-  arregladas: el mismo escalón construido con una unión sale limpio siempre. Acotado en
-  `ContorneadoEnAristasVivasTest`. El certificado se niega a escribir, de modo que el
-  síntoma es un export que no sale, no una pieza rota.
 - El 3MF se escribe sin compresión.
 - No existe aplicación iPad ni render por tiles.
 - Las curvas se escriben en el contrato y se reeditan reescribiéndolo o pidiéndoselo otra
