@@ -199,3 +199,6 @@ The previous long-form README is preserved as the
 [`technical overview`](docs/technical-overview.md). It contains detailed
 invariants, algorithms, interaction notes, privacy boundaries, limitations and
 the full roadmap.
+
+See the [security policy](SECURITY.md) and [third-party notices](THIRD_PARTY_NOTICES.md).
+Yunkil is released under the [MIT License](LICENSE).
