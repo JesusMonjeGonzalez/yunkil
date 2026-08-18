@@ -10,4 +10,5 @@ local.properties
 *.db
 *.sqlite*
 *.log
+*.bak
 .idea/

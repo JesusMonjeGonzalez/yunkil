@@ -20,3 +20,15 @@ jobs:
           cache: gradle
       - name: Test Kotlin core
         run: ./gradlew :core:jvmTest
+
+  macos-verification:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Run native and application harness
+        run: ./scripts/comprobar.sh
