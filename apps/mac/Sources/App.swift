@@ -2556,29 +2556,35 @@ struct VistaPrincipal: View {
                 .disabled(!estado.puedeDeshacer)
                 .keyboardShortcut("z", modifiers: .command)
                 .help("Deshacer")
+                .accessibilityLabel("Deshacer")
 
             Button { estado.rehacer() } label: { Image(systemName: "arrow.uturn.forward") }
                 .disabled(!estado.puedeRehacer)
                 .keyboardShortcut("z", modifiers: [.command, .shift])
                 .help("Rehacer")
+                .accessibilityLabel("Rehacer")
         }
 
         ToolbarItemGroup {
             Button { mostrarGuia = true } label: { Image(systemName: "wand.and.sparkles") }
                 .help("Diseñar mediante preguntas")
+                .accessibilityLabel("Diseñar mediante preguntas")
 
             Button { estado.encuadrar() } label: { Image(systemName: "viewfinder") }
                 .help("Encuadrar el modelo")
+                .accessibilityLabel("Encuadrar el modelo")
 
             Button { estado.alternarSeccion() } label: {
                 Image(systemName: estado.seccionActiva ? "cube.transparent.fill" : "cube.transparent")
             }
             .help("Sección en vivo: corta el modelo y tiñe las paredes finas")
+            .accessibilityLabel("Alternar sección en vivo")
 
             Button { estado.duplicar() } label: { Image(systemName: "plus.square.on.square") }
                 .keyboardShortcut("d", modifiers: .command)
                 .disabled(estado.seleccion.isEmpty)
                 .help("Duplicar pieza")
+                .accessibilityLabel("Duplicar pieza")
 
             Menu {
                 Button("Soporte") { estado.cargarEjemplo("soporte") }
@@ -2590,19 +2596,23 @@ struct VistaPrincipal: View {
                 Image(systemName: "square.stack.3d.up")
             }
             .help("Ejemplos")
+            .accessibilityLabel("Cargar ejemplo")
 
             Button { estado.abrir() } label: { Image(systemName: "folder") }
                 .keyboardShortcut("o", modifiers: .command)
                 .help("Abrir")
+                .accessibilityLabel("Abrir documento")
 
             Button { estado.guardar() } label: { Image(systemName: "square.and.arrow.down") }
                 .keyboardShortcut("s", modifiers: .command)
                 .help("Guardar")
+                .accessibilityLabel("Guardar documento")
 
             Button { estado.exportarPieza() } label: { Image(systemName: "printer.filled.and.paper") }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
                 .disabled(estado.exportando || estado.editor.estaVacio)
                 .help("Exportar la pieza para imprimir: 3MF o STL")
+                .accessibilityLabel("Exportar la pieza para imprimir")
         }
     }
 

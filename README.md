@@ -178,6 +178,7 @@ verification gates.
 - macOS/Apple Silicon application only; no finished iPad application.
 - The app harness drives the state layer, not the SwiftUI view tree: layout and rendered controls have no automated coverage.
 - No signed, notarized public release: that needs an Apple Developer account, not code.
+- A passing geometry certificate is not a safety, fit or manufacturing guarantee.
 - An examination costs seconds even on a small part — measured: 9 s on a 14 mm box with a
   release core — because it samples the surface at nozzle density whatever the part
   measures. It runs in the background, but it is not something to ask for on every change.
