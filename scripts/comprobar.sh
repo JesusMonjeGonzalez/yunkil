@@ -27,6 +27,7 @@ set -euo pipefail
 RAIZ="$(cd "$(dirname "$0")/.." && pwd)"
 QUE="${1:-todo}"
 cd "$RAIZ"
+mkdir -p build
 
 fallos=0
 paso() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }

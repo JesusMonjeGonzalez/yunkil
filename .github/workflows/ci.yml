@@ -20,3 +20,22 @@ jobs:
           cache: gradle
       - name: Test Kotlin core
         run: ./gradlew :core:jvmTest
+
+  macos-verification:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Run portable core verification
+        run: ./scripts/comprobar.sh nucleo
+      - name: Run portable camera and gizmo harnesses
+        run: |
+          mkdir -p build
+          swiftc -O tools/rayo/main.swift apps/mac/Sources/Camara.swift -o build/rayo-arnes
+          ./build/rayo-arnes
+          swiftc -O tools/gizmo/main.swift apps/mac/Sources/Camara.swift apps/mac/Sources/Gizmo.swift -o build/gizmo-arnes
+          ./build/gizmo-arnes
