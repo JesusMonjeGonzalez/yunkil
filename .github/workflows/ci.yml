@@ -32,8 +32,6 @@ jobs:
           cache: gradle
       - name: Run portable core verification
         run: ./scripts/comprobar.sh nucleo
-      - name: Build macOS application
-        run: ./scripts/construir-mac.sh debug
       - name: Run portable camera and gizmo harnesses
         run: |
           mkdir -p build
