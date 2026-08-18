@@ -11,4 +11,4 @@ Still open before a distributable release:
 - profile versioning and restore validation;
 - SwiftUI accessibility verification;
 - signed/notarized packaging;
-- an explicit repository license.
+- a third-party dependency and asset inventory for packaged distribution.
