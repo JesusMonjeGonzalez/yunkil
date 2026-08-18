@@ -30,5 +30,14 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
-      - name: Run native and application harness
-        run: ./scripts/comprobar.sh
+      - name: Run portable core verification
+        run: ./scripts/comprobar.sh nucleo
+      - name: Build macOS application
+        run: ./scripts/construir-mac.sh debug
+      - name: Run portable camera and gizmo harnesses
+        run: |
+          mkdir -p build
+          swiftc -O tools/rayo/main.swift apps/mac/Sources/Camara.swift -o build/rayo-arnes
+          ./build/rayo-arnes
+          swiftc -O tools/gizmo/main.swift apps/mac/Sources/Camara.swift apps/mac/Sources/Gizmo.swift -o build/gizmo-arnes
+          ./build/gizmo-arnes
