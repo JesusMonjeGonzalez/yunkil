@@ -6,6 +6,7 @@ import yunkil.doc.Encaje
 import yunkil.doc.SentidoDeEncaje
 import yunkil.doc.aplanar
 import yunkil.doc.holguraCon
+import yunkil.doc.holguraEfectiva
 import yunkil.doc.medidaDe
 import yunkil.ia.EjeNombrado
 import yunkil.ia.nodoEnMundoDe
@@ -33,6 +34,8 @@ data class EncajeMedido(
     val piezaNombre: String,
     val nominal: Float,
     val holguraDeclarada: Float,
+    /** La incertidumbre declarada de la medida del mundo, en mm. Cero si no se dijo. */
+    val toleranciaDeLaMedida: Float = 0f,
     /** La holgura que de verdad tiene la pieza construida. Negativa si se pisan. */
     val holguraMedida: Float,
     /** Paso de muestreo con el que se midió: la incertidumbre de la cifra anterior. */
@@ -85,20 +88,22 @@ class VerificadorDeEncajes(
 
     fun medir(): List<EncajeMedido> = documento.raiz.aplanar()
         .map { it.first }
-        .mapNotNull { pieza ->
-            val encaje = pieza.encaje ?: return@mapNotNull null
-            medirUno(pieza.id, pieza.nombre, encaje)
-        }
+        .flatMap { pieza -> pieza.encajes.map { medirUno(pieza.id, pieza.nombre, it) } }
 
     private fun medirUno(id: String, nombre: String, encaje: Encaje): EncajeMedido {
-        val declarada = encaje.holguraCon(perfil)
         val medida = documento.medidaDe(encaje.medida)
+        // La holgura declarada es la efectiva: con la parte proporcional activada,
+        // verificar contra el piso fijo del perfil daría «cumple» falsos por defecto
+        // en diámetros grandes, justo donde la marca existe para ayudar.
+        val declarada = medida?.let { encaje.holguraEfectiva(it.valor, perfil) }
+            ?: encaje.holguraCon(perfil)
         val sinMedir = { motivo: String ->
             EncajeMedido(
                 piezaId = id,
                 piezaNombre = nombre,
                 nominal = medida?.valor ?: 0f,
                 holguraDeclarada = declarada,
+                toleranciaDeLaMedida = medida?.tolerancia ?: 0f,
                 holguraMedida = Float.NaN,
                 resolucion = paso,
                 cumple = false,
@@ -107,6 +112,15 @@ class VerificadorDeEncajes(
         }
 
         if (medida == null) return sinMedir("no existe la medida «${encaje.medida}»")
+        // La incertidumbre de la medida se come la holgura: una holgura de 0,2 mm
+        // contra una medida incierta en ±0,3 no puede decirse que se cumpla. Falla
+        // cerrado, como todo aquí.
+        if (medida.tolerancia >= declarada) {
+            return sinMedir(
+                "la incertidumbre de la medida (±${redondear(medida.tolerancia, 2)} mm) se come " +
+                    "la holgura declarada (${redondear(declarada, 2)} mm): mídela con más cuidado",
+            )
+        }
         val propio = documento.nodoEnMundoDe(id)
             ?: return sinMedir("la pieza no aporta material: está oculta o vacía")
 
@@ -135,6 +149,7 @@ class VerificadorDeEncajes(
             piezaNombre = nombre,
             nominal = medida.valor,
             holguraDeclarada = declarada,
+            toleranciaDeLaMedida = medida.tolerancia,
             holguraMedida = holgura,
             resolucion = paso,
             cumple = kotlin.math.abs(holgura - declarada) <= tolerancia,

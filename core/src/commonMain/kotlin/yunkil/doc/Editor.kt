@@ -8,12 +8,16 @@ import yunkil.fabricacion.CuponDeCalibracion
 import yunkil.fabricacion.BuscadorDeOrientacion
 import yunkil.fabricacion.Correccion
 import yunkil.fabricacion.Estandares
+import yunkil.fabricacion.EstimacionDeImpresion
 import yunkil.fabricacion.InformeDeFabricacion
+import yunkil.fabricacion.InterferenciaDeCuerpos
 import yunkil.fabricacion.OrientacionEvaluada
 import yunkil.fabricacion.OrigenDelPerfil
 import yunkil.fabricacion.AjusteDeTaladro
 import yunkil.fabricacion.PerfilFabricacion
 import yunkil.fabricacion.Roscas
+import yunkil.fabricacion.VerificadorDeEnsamblajes
+import yunkil.fabricacion.aMarkdown
 import yunkil.ia.Aplicador
 import yunkil.ia.Asiento
 import yunkil.ia.Bitacora
@@ -44,6 +48,7 @@ import yunkil.imagen.Vistas
 import yunkil.kernel.Aabb
 import yunkil.kernel.Axis
 import yunkil.kernel.CampoDeMalla
+import yunkil.kernel.Cordon
 import yunkil.kernel.Esfera
 import yunkil.kernel.Perfil2D
 import yunkil.kernel.Punto2
@@ -56,10 +61,13 @@ import yunkil.kernel.applyMatrix
 import yunkil.kernel.empaquetarUniforms
 import yunkil.malla.Certificado
 import yunkil.malla.LectorStl
+import yunkil.malla.TresMf
+import yunkil.malla.escribirArchivo
 import yunkil.malla.leerArchivo
 import yunkil.malla.anadirLinea
 import yunkil.malla.Exportador
 import yunkil.organico.MotorOrganico
+import yunkil.organico.ResultadoContratoOrganico
 import yunkil.msl.CampoEnShader
 import yunkil.msl.MslGenerator
 import kotlin.math.PI
@@ -274,6 +282,27 @@ class Editor(inicial: Documento = Documento.vacio()) {
         nombrePerfil: String? = null,
     ): Boolean {
         val nuevo = plan?.let { arbolDe(it, aceptadas, nombrePerfil) }
+        if (nuevo == nodoFantasma) return false
+        nodoFantasma = nuevo
+        uniformsDelFantasma = nuevo?.empaquetarUniforms()?.toList() ?: emptyList()
+        return regenerar()
+    }
+
+    /**
+     * Pone —o quita— el fantasma de una escultura orgánica propuesta por la IA.
+     *
+     * Usa el mismo canal que [previsualizar] a propósito: mirar el contrato no toca
+     * el documento, no gasta un punto de deshacer y no aparece en el árbol. Una
+     * escultura es un árbol como cualquier otro, y el generador ya sabe emitir un
+     * segundo árbol de vista; lo único que cambia es de dónde sale el nodo.
+     *
+     * Un contrato que no compila quita el fantasma en lugar de dejar el anterior:
+     * enseñar una figura que ya no es la propuesta es mentir en el momento de decidir.
+     *
+     * Devuelve `true` si hay que recompilar el shader, igual que el resto de ediciones.
+     */
+    fun previsualizarEscultura(contratoCanonico: String?): Boolean {
+        val nuevo = contratoCanonico?.let { MotorOrganico.nodoDeContrato(it) }
         if (nuevo == nodoFantasma) return false
         nodoFantasma = nuevo
         uniformsDelFantasma = nuevo?.empaquetarUniforms()?.toList() ?: emptyList()
@@ -507,7 +536,7 @@ class Editor(inicial: Documento = Documento.vacio()) {
         }
 
         if (gobernadaPorEncaje(id, clave)) {
-            val encaje = pieza.encaje!!
+            val encaje = documento.encajeQueGobierna(pieza, clave)!!
             val medida = documento.medidaDe(encaje.medida)?.nombre ?: encaje.medida
             return rechazar(
                 "«$clave» manda en ${encaje.eje}, y en ${encaje.eje} manda el encaje con " +
@@ -1007,7 +1036,542 @@ class Editor(inicial: Documento = Documento.vacio()) {
         return encontradas.singleOrNull()
     }
 
-    // ------------------------------------------------------------------ perfiles
+    // ---------------------------------------------------------------- plantillas
+
+    /**
+     * Guarda una pieza del documento como plantilla reutilizable.
+     *
+     * Una MALLA no se deja guardar a propósito: su campo horneado no viaja —son
+     * megas— y una plantilla que al insertarse llega vacía es una trampa. Lo que
+     * siempre puede viajar es lo paramétrico: primitivas, perfiles, esculturas con
+     * su contrato, y los cables.
+     */
+    fun guardarComoPlantilla(id: String, nombre: String, ruta: String): Boolean {
+        if (id == documento.raiz.id) return rechazar("La raíz no es una pieza: es el documento entero")
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        if (pieza.tipo == TipoPieza.MALLA) {
+            return rechazar(
+                "${pieza.nombre} es una malla importada; su campo no viaja en la plantilla",
+            )
+        }
+        // Las medidas que este subárbol nombra viajan con él: sin ellas, el encaje
+        // insertado quedaría apuntando a un número que nadie sabe en el documento
+        // nuevo.
+        val idsDeEncaje = pieza.aplanar().flatMap { it.first.encajes }.map { it.medida }.toSet()
+        val medidas = documento.medidas.filter { it.id in idsDeEncaje }
+        val motivo = BibliotecaDePlantillas.guardar(nombre, pieza, ruta, medidas)
+        return if (motivo == null) true else rechazar(motivo)
+    }
+
+    /**
+     * Inserta una plantilla de la biblioteca como pieza nueva, con identificadores
+     * frescos y en una sola transacción deshacible.
+     *
+     * Los identificadores se **regeneran todos**, no se reutilizan: los ids del
+     * documento abierto ya pueden estar usados, y una colisión no da error —hace que
+     * `buscar` y `mapear` muevan la pieza equivocada—. Con encaje viaja además la
+     * medida del mundo que lo justifica, si el documento no la tiene ya: una pieza
+     * que dice encajar con un tubo de 20 mm no puede insertarse sin saber cuánto
+     * mide el tubo.
+     */
+    fun insertarPlantilla(nombre: String, ruta: String, padreId: String? = null): Boolean {
+        val plantilla = BibliotecaDePlantillas.leer(nombre, ruta)
+            ?: return rechazar("No hay ninguna plantilla llamada «$nombre»")
+        if (plantilla.pieza.tipo == TipoPieza.MALLA) {
+            return rechazar("La plantilla «$nombre» es una malla y no conserva su geometría")
+        }
+
+        fun conIdFresco(pieza: Pieza): Pieza {
+            val base = Pieza.nueva(pieza.tipo, pieza.nombre)
+            return pieza.copy(id = base.id, hijos = pieza.hijos.map(::conIdFresco))
+        }
+        val insertada = conIdFresco(plantilla.pieza)
+
+        // Las medidas que la plantilla necesita y el documento no tiene todavía.
+        val idsDeEncaje = insertada.aplanar()
+            .flatMap { it.first.encajes }
+            .map { it.medida }
+            .toSet()
+        val nuevas = idsDeEncaje.filter { existente ->
+            documento.medidas.none { it.id == existente }
+        }.mapNotNull { id -> plantilla.medidas.firstOrNull { it.id == id } }
+        val destino = destinoValidoPara(padreId ?: documento.raiz.id)
+
+        return aplicar { doc ->
+            doc.copy(
+                medidas = doc.medidas + nuevas,
+                raiz = doc.raiz.mapear(destino) { it.copy(hijos = it.hijos + insertada) },
+                seleccionado = insertada.id,
+            )
+        }
+    }
+
+    /** Fija la incertidumbre de una medida del mundo, en mm, como una edición deshacible. */
+    fun fijarTolerancia(medidaId: String, toleranciaMm: Float): Boolean {
+        val medida = documento.medidas.firstOrNull { it.id == medidaId }
+            ?: return rechazar("No existe la medida $medidaId")
+        if (!toleranciaMm.isFinite() || toleranciaMm < 0f) {
+            return rechazar("La tolerancia no puede ser negativa ni un número vacío")
+        }
+        if (2f * toleranciaMm >= medida.valor) {
+            return rechazar(
+                "±${redondeado(toleranciaMm)} mm deja la medida «${medida.nombre}» sin valor posible",
+            )
+        }
+        return aplicar { doc ->
+            doc.copy(medidas = doc.medidas.map {
+                if (it.id == medidaId) it.copy(tolerancia = toleranciaMm) else it
+            })
+        }
+    }
+
+    /**
+     * Advertencias baratas sobre el documento tal y como está: lo que se sabe sin
+     * muestrear el campo ni tardar segundos.
+     *
+     * No sustituye al análisis —no ve voladizos ni paredes interiores—, pero responde
+     * en milisegundos y mientras se edita: un radio por debajo de la boquilla, una
+     * pieza que no cabe en el plato. Son las mismas reglas de siempre, tomadas de los
+     * números del perfil, no una opinión de quien programa.
+     */
+    fun advertenciasRapidas(): List<String> {
+        val avisos = ArrayList<String>()
+        val perfil = perfilActivo()
+        for ((pieza, _) in documento.raiz.aplanar()) {
+            // La raíz compila el documento entero: sus "cotas" serían las del modelo
+            // completo y sus avisos, ruido con nombre de raíz. Las piezas hablan.
+            if (!pieza.visible || pieza.id == documento.raiz.id) continue
+            for ((clave, valor) in pieza.parametros) {
+                if (valor <= 0f || !valor.isFinite()) continue
+                if (clave.startsWith("acuerdo")) continue
+                val definicion = pieza.tipo.parametrosCon(pieza.forma)
+                    .firstOrNull { it.clave == clave } ?: continue
+                if (definicion.unidad != "mm") continue
+                if (valor < perfil.boquilla) {
+                    avisos.add(
+                        "«${pieza.nombre}»: ${definicion.etiqueta} de ${redondeado(valor)} mm " +
+                            "está por debajo del detalle mínimo de la boquilla " +
+                            "(${redondeado(perfil.boquilla)} mm); no llegará a existir",
+                    )
+                }
+            }
+            val cotas = documento.cotasEnMundoDe(pieza.id) ?: continue
+            val plato = perfil.volumenDeImpresion
+            if (cotas.size.x > plato.x || cotas.size.y > plato.y || cotas.size.z > plato.z) {
+                avisos.add(
+                    "«${pieza.nombre}» mide ${redondeado(cotas.size.x)} × " +
+                        "${redondeado(cotas.size.y)} × ${redondeado(cotas.size.z)} mm y no cabe " +
+                        "en el volumen de impresión de ${perfil.nombre}",
+                )
+            }
+        }
+        return avisos
+    }
+
+    /** La distancia —o el solape— entre dos piezas cualesquiera, sin declarar nada. */
+    fun distanciaEntre(aId: String, bId: String, paso: Float = 0.8f): InterferenciaDeCuerpos {
+        val a = documento.buscar(aId)
+            ?: return InterferenciaDeCuerpos("(sin ensamblaje)", aId, bId, aId, bId, null, null)
+        val b = documento.buscar(bId)
+            ?: return InterferenciaDeCuerpos("(sin ensamblaje)", aId, bId, aId, bId, null, null)
+        return VerificadorDeEnsamblajes(documento, paso).medirPar(a, b)
+    }
+
+    /**
+     * Coloca las piezas sobre el plato —base en Y = 0— en filas sin solaparse, dentro
+     * del volumen de impresión del perfil, como **una sola transacción**.
+     *
+     * Es el paso que falta entre «tengo cinco piezas para imprimir» y «mándolas
+     * juntas»: sin esto, las variantes salen en fila por su ancho y un ensamblaje
+     * llega a la placa como está, con los cuerpos encajados unos en otros. El orden
+     * es el de estantería —primero las más profundas— porque deja menos hueco
+     * desperdiciado que el orden de llegada.
+     */
+    fun empaquetarEnPlaca(ids: List<String>, margen: Float = 5f): Boolean {
+        if (!margen.isFinite() || margen < 0f) {
+            return rechazar("El margen de la placa no puede ser negativo")
+        }
+        val pedidas = ids.map { id ->
+            documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        }.distinct()
+        if (pedidas.size < 2) return rechazar("Para empacar hacen falta al menos dos piezas")
+
+        val plato = perfilActivo().volumenDeImpresion
+        val huellas = pedidas.map { pieza ->
+            val cotas = documento.cotasEnMundoDe(pieza.id)
+                ?: return rechazar("«${pieza.nombre}» no aporta material: está oculta o vacía")
+            Triple(pieza.id, cotas, cotas.size)
+        }
+
+        // Estantería: filas a lo ancho del plato, cada fila tan honda como su pieza
+        // más honda. Primero se decide dónde va cada una, y solo si cabe todo se
+        // toca el documento: no se puede dejar la mitad de la placa colocada.
+        var x = 0f
+        var z = 0f
+        var fondoDeFila = 0f
+        val destinos = LinkedHashMap<String, Vec3>()
+        for ((id, cotas, _) in huellas.sortedByDescending { it.third.z }) {
+            val nombre = pedidas.first { it.id == id }.nombre
+            if (cotas.size.x > plato.x || cotas.size.z > plato.z) {
+                return rechazar(
+                    "«$nombre» es más ancha de lo que el plato permite: " +
+                        "${redondeado(cotas.size.x)} × ${redondeado(cotas.size.z)} mm frente a " +
+                        "${redondeado(plato.x)} × ${redondeado(plato.z)} mm",
+                )
+            }
+            if (x > 0f && x + cotas.size.x > plato.x) {
+                x = 0f
+                z += fondoDeFila + margen
+                fondoDeFila = 0f
+            }
+            if (z + cotas.size.z > plato.z) {
+                return rechazar("Las piezas no caben todas en el plato de ${perfilActivo().nombre}")
+            }
+            destinos[id] = Vec3(x, 0f, z)
+            x += cotas.size.x + margen
+            fondoDeFila = maxOf(fondoDeFila, cotas.size.z)
+        }
+
+        val origenes = huellas.associate { (id, cotas, _) -> id to cotas.min }
+        return aplicar { doc ->
+            var raiz = doc.raiz
+            for ((id, destinoMin) in destinos) {
+                val origen = origenes.getValue(id)
+                val deltaMundo = destinoMin - origen
+                raiz = raiz.mapear(id) { pieza ->
+                    // La traslación vive en el espacio del padre: el delta del mundo
+                    // hay que traerlo aquí, y una rotación o escala del padre entran
+                    // solas por la misma cuenta que el resto de movimientos.
+                    val acumulado = doc.transformDelPadreDe(pieza.id)
+                        ?.componer(pieza.transform) ?: pieza.transform
+                    val deltaLocal = acumulado.worldToLocal(deltaMundo) - acumulado.worldToLocal(Vec3.ZERO)
+                    pieza.copy(transform = pieza.transform.copy(
+                        translation = pieza.transform.translation + deltaLocal,
+                    ))
+                }
+            }
+            doc.copy(raiz = raiz)
+        }
+    }
+
+    /**
+     * Separa los cuerpos de un ensamblaje sobre el plato, con la holgura de montaje
+     * pedida entre cada par.
+     *
+     * Es la salida a impresora del ensamblaje: los cuerpos llegan encajados en el
+     * modelo porque así se diseñan, y hay que repartirlos para que salgan separados
+     * de una sola placa y monten después. Empaquetar **es** separar: la misma
+     * colocación en filas, con el margen que pida el montaje.
+     */
+    fun separarEnsamblaje(ensamblajeId: String, holguraDeMontaje: Float = 0.5f): Boolean {
+        val ensamblaje = documento.ensamblajes.firstOrNull { it.id == ensamblajeId }
+            ?: return rechazar("No existe el ensamblaje $ensamblajeId")
+        if (!ensamblaje.piezas.all { documento.buscar(it) != null }) {
+            return rechazar("El ensamblaje «${ensamblaje.nombre}» tiene piezas que ya no están")
+        }
+        return empaquetarEnPlaca(ensamblaje.piezas, holguraDeMontaje)
+    }
+
+    // ------------------------------------------------------------------- hitos
+
+    /**
+     * Un punto del historial con nombre, para volver a él sin contar deshaceres.
+     *
+     * «antes de los agujeros» vale más que veinte ⌘Z. La marca guarda la profundidad
+     * del historial en el momento —los documentos son inmutables, así que volver es
+     * deshacer hasta esa altura—, y el cursor funciona en los dos sentidos mientras
+     * el camino exista: deshacer y rehacer lo recorren.
+     */
+    private val hitos = LinkedHashMap<String, Documento>()
+
+    fun marcarHito(nombre: String): Boolean {
+        val limpio = nombre.trim()
+        if (limpio.isEmpty()) return rechazar("Un hito sin nombre no se puede volver a buscar")
+        // Los documentos son inmutables y el historial guarda referencias: guardar el
+        // documento es guardar el estado exacto, sin números de profundidad que se
+        // desincronicen si alguien deshace más allá y edita por encima.
+        hitos[limpio] = documento
+        return true
+    }
+
+    fun hitos(): List<String> = hitos.keys.toList()
+
+    /**
+     * Vuelve al documento que había cuando se marcó el hito.
+     *
+     * Puede fallar con honestidad: si después de marcar se deshizo más allá y se
+     * editó por encima, el camino que llevaba al hito se perdió, y decirlo vale más
+     * que fingir que se llegó.
+     */
+    fun deshacerHasta(nombre: String): Boolean {
+        val objetivo = hitos[nombre] ?: return rechazar("No hay ningún hito llamado «$nombre»")
+        if (documento === objetivo) return true
+        // Los snapshots son referencias compartidas, así que basta comparar identidad.
+        val estaAtras = historial.any { it === objetivo }
+        val estaDelante = rehechos.any { it === objetivo }
+        return when {
+            estaAtras -> {
+                while (documento !== objetivo) {
+                    if (!deshacer()) return rechazar("El hito «$nombre» ya no se puede alcanzar")
+                }
+                true
+            }
+            estaDelante -> {
+                while (documento !== objetivo) {
+                    if (!rehacer()) return rechazar("El hito «$nombre» ya no se puede alcanzar")
+                }
+                true
+            }
+            else -> rechazar("El hito «$nombre» ya no se puede alcanzar: se editó por debajo de él")
+        }
+    }
+
+    // ------------------------------------------------------------------- medidas
+
+    /** Las procedencias que una medida puede declarar, en el orden del enum. */
+    fun procedenciasDeMedida(): List<String> =
+        ProcedenciaDeMedida.entries.map { it.name }
+
+    /**
+     * Fija de dónde salió una medida del mundo.
+     *
+     * La procedencia era un dato de nacimiento: la IA da de alta sus medidas «a ojo»
+     * porque se las han dicho y no las ha medido, y hasta ahora subirla a «con
+     * calibre» exigía tocar el núcleo a mano. Quien midió es exactamente quien debe
+     * poder decirlo, y un encaje verificado contra una medida a ojo no vale lo mismo
+     * que uno verificado contra una medida con calibre.
+     */
+    fun fijarProcedencia(medidaId: String, procedenciaNombre: String): Boolean {
+        val procedencia = ProcedenciaDeMedida.entries.firstOrNull {
+            it.name == procedenciaNombre.uppercase()
+        } ?: return rechazar("Procedencia desconocida: $procedenciaNombre")
+        if (documento.medidas.none { it.id == medidaId }) {
+            return rechazar("No existe la medida $medidaId")
+        }
+        return aplicar { doc ->
+            doc.copy(medidas = doc.medidas.map {
+                if (it.id == medidaId) it.copy(procedencia = procedencia) else it
+            })
+        }
+    }
+
+    /**
+     * Las medidas que ningún encaje usa, por identificador.
+     *
+     * Una medida huérfana no estorba, pero tampoco justifica nada: conviene saber
+     * cuáles están ahí solo porque alguien dejó de declarar el encaje que las iba a
+     * usar, o porque se soltó.
+     */
+    fun medidasSinUso(): List<String> {
+        val usadas = documento.raiz.aplanar().flatMap { it.first.encajes }.map { it.medida }.toSet()
+        return documento.medidas.filter { it.id !in usadas }.map { it.id }
+    }
+
+    /**
+     * Activa —o quita— la parte de holgura proporcional al diámetro de un encaje ya
+     * declarado. Una edición como cualquier otra: transaccional y deshacible.
+     */
+    fun fijarHolguraProporcional(piezaId: String, activa: Boolean): Boolean {
+        val pieza = documento.buscar(piezaId) ?: return rechazar("No existe la pieza $piezaId")
+        if (pieza.encajes.isEmpty()) return rechazar("${pieza.nombre} no tiene encaje declarado")
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(piezaId) {
+                    it.copy(encajes = it.encajes.map { e -> e.copy(holguraProporcional = activa) })
+                },
+            )
+        }
+    }
+
+    /** Los ensamblajes declarados en el documento, tal y como están. */
+    fun ensamblajes(): List<Ensamblaje> = documento.ensamblajes
+
+    /** El documento completo, para la frontera de persistencia y las pruebas. */
+    fun documento(): Documento = documento
+
+    /** El valor actual de un parámetro de una pieza, o `null` si la clave no existe. */
+    fun parametro(id: String, clave: String): Float? {
+        val pieza = documento.buscar(id) ?: return null
+        if (pieza.tipo.parametrosCon(pieza.forma).none { it.clave == clave }) return null
+        return pieza.parametro(clave)
+    }
+
+    /** Las cotas en el mundo de una pieza, o `null` si no aporta geometría. */
+    fun cotasDe(id: String): Aabb? = documento.cotasEnMundoDe(id)
+
+    /** La pieza pedida, para lecturas puntuales del documento. */
+    fun pieza(id: String): Pieza? = documento.buscar(id)
+
+    // ----------------------------------------------------------------- ensamblajes
+
+    /**
+     * Declara que estas piezas tienen que ir separadas y montarse después.
+     *
+     * Sin esta declaración una interferencia no significa nada —la raíz es una unión
+     * y solapar piezas es como se construye una pieza— y con ella es siempre un
+     * problema: nadie la declara para cuerpos que no tengan que ensamblar. Ver
+     * [yunkil.fabricacion.VerificadorDeEnsamblajes].
+     */
+    fun declararEnsamblaje(nombre: String, piezas: List<String>): Boolean {
+        val limpio = nombre.trim().ifEmpty { "Ensamblaje" }
+        val unicas = piezas.distinct()
+        if (unicas.size < 2) return rechazar("Un ensamblaje necesita al menos dos cuerpos")
+        for (id in unicas) {
+            val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+            if (pieza.id == documento.raiz.id) {
+                return rechazar("La raíz no puede ser un cuerpo de un ensamblaje")
+            }
+        }
+        val numero = documento.ensamblajes
+            .mapNotNull { it.id.substringAfterLast('-').toIntOrNull() }
+            .maxOrNull()?.plus(1) ?: 1
+        val ensamblaje = Ensamblaje("ensamblaje-$numero", limpio, unicas)
+        return aplicar { doc -> doc.copy(ensamblajes = doc.ensamblajes + ensamblaje) }
+    }
+
+    fun quitarEnsamblaje(id: String): Boolean {
+        if (documento.ensamblajes.none { it.id == id }) {
+            return rechazar("No existe el ensamblaje $id")
+        }
+        return aplicar { doc ->
+            doc.copy(ensamblajes = doc.ensamblajes.filter { it.id != id })
+        }
+    }
+
+    /**
+     * Mide las interferencias de cada ensamblaje declarado. No toca el documento.
+     *
+     * Lo que no se puede medir no se aprueba: el par llega con `solape = null` y el
+     * motivo de que no hay campo se lo debe contar quien enseñe la lista.
+     */
+    fun verificarEnsamblajes(paso: Float = 0.8f): List<InterferenciaDeCuerpos> =
+        VerificadorDeEnsamblajes(documento, paso).verificar()
+
+    // ----------------------------------------------------------------- variantes
+
+    /**
+     * Clona la pieza una vez por valor del parámetro, en una sola transacción.
+     *
+     * Es la operación del trabajo de encaje de toda la vida: «dame el tapón para 19,
+     * para 20 y para 21, y pruebo cuál va». Hacerlo a mano son tres duplicaciones,
+     * tres retoces de parámetro y tres renombrados con seis puntos de deshacer.
+     *
+     * Las variantes salen **en fila**, separadas por el ancho de la pieza más un
+     * margen, para que se puedan mandar a imprimir juntas y probarlas sin confundir
+     * cuál es cuál: el valor va en el nombre de cada una. El encaje **no** viaja a las
+     * copias a propósito: todas las variantes comparten la misma medida del mundo y
+     * el resolver las aplanaría todas al mismo tamaño, que es justo lo que la prueba
+     * quiere distinguir.
+     */
+    fun generarVariantes(id: String, clave: String, valores: List<Float>): Boolean {
+        if (id == documento.raiz.id) return rechazar("La raíz no tiene parámetros que variar")
+        val original = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        val definicion = original.tipo.parametrosCon(original.forma)
+            .firstOrNull { it.clave == clave }
+            ?: return rechazar("«$clave» no es un parámetro de ${original.nombre}")
+        if (valores.isEmpty() || valores.size > 12) {
+            return rechazar("Entre 1 y 12 variantes; llegaron ${valores.size}")
+        }
+        for (valor in valores) {
+            if (!valor.isFinite() || valor < definicion.minimo || valor > definicion.maximo) {
+                return rechazar(
+                    "${definicion.etiqueta} tiene que estar entre ${redondeado(definicion.minimo)} " +
+                        "y ${redondeado(definicion.maximo)}; llegó ${redondeado(valor)}",
+                )
+            }
+        }
+        val ancho = documento.cotasEnMundoDe(id)?.size?.x ?: 0f
+        val paso = ancho + 4f
+        val destino = documento.padreDe(id) ?: documento.raiz.id
+
+        val variantes = valores.mapIndexed { indice, valor ->
+            val base = Pieza.nueva(original.tipo, "${original.nombre} ${redondeado(valor)} mm")
+            base.copy(
+                parametros = original.parametros + (clave to valor),
+                transform = original.transform.copy(
+                    translation = original.transform.translation + Vec3(paso * (indice + 1), 0f, 0f),
+                ),
+                hijos = original.hijos,
+                forma = original.forma,
+                puntos = original.puntos,
+                contratoOrganico = original.contratoOrganico,
+                // Los encajes se quedan en la original: ver arriba.
+                encajes = emptyList(),
+            )
+        }
+        val primera = variantes.first().id
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(destino) { it.copy(hijos = it.hijos + variantes) },
+                seleccionado = primera,
+            )
+        }
+    }
+
+    // -------------------------------------------------- partes orgánicas semánticas
+
+    /**
+     * Aplica una edición semántica a una parte del contrato de una escultura, como
+     * una transacción deshacible.
+     *
+     * El cambio lo resuelve `MotorOrganico` con el mismo validador que aceptó el
+     * contrato: si la parte editada deja de tocar a su padre, se rechaza con el motivo
+     * y el documento queda exactamente como estaba. Mover la cola no debe poder
+     * partir la figura por la mitad.
+     */
+    private fun editarContratoOrganico(
+        id: String,
+        cambio: (contrato: String) -> ResultadoContratoOrganico,
+    ): Boolean {
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        val contrato = pieza.contratoOrganico
+            ?: return rechazar("La escultura no conserva su anatomía")
+        if (pieza.tipo != TipoPieza.ESCULTURA) return rechazar("La edición semántica es de esculturas")
+        val resultado = cambio(contrato)
+        val canonico = resultado.contratoCanonico
+            ?: return rechazar(resultado.motivo ?: "No se pudo editar la parte")
+        return aplicar { doc ->
+            doc.copy(raiz = doc.raiz.mapear(id) { it.copy(contratoOrganico = canonico) })
+        }
+    }
+
+    /**
+     * Mueve una parte orgánica —«la cola», «la oreja izquierda»— por su identificador
+     * semántico, en milímetros del espacio local de la escultura.
+     *
+     * Es el primer paso de la modificación directa de partes orgánicas: hasta ahora
+     * mover una cola exigía reescribir el contrato o pedírselo otra vez a la IA, y el
+     * identificador ya sabía a qué parte se refería.
+     */
+    fun moverParteOrganica(id: String, parteId: String, dx: Float, dy: Float, dz: Float): Boolean =
+        editarContratoOrganico(id) { MotorOrganico.moverParte(it, parteId, dx, dy, dz) }
+
+    /** Engorda —o afina, con delta negativo— una parte orgánica sin mover su eje. */
+    fun engordarParteOrganica(id: String, parteId: String, deltaMm: Float): Boolean =
+        editarContratoOrganico(id) { MotorOrganico.engordarParte(it, parteId, deltaMm) }
+
+    /** Quita una parte orgánica y reataja a las que colgaban de ella. */
+    fun quitarParteOrganica(id: String, parteId: String): Boolean =
+        editarContratoOrganico(id) { MotorOrganico.quitarParte(it, parteId) }
+
+    /**
+     * Qué parte de la anatomía hay bajo un punto **del mundo**.
+     *
+     * Convierte el punto al espacio local de la escultura con la misma transformación
+     * que usan las brochas —girar o escalar la figura gira el gesto con ella— y deja
+     * en manos del motor decir qué parte está debajo. Es lo que un clic de selección
+     * necesita para responder «la cola» en vez de «la escultura».
+     */
+    fun parteOrganicaBajo(id: String, x: Float, y: Float, z: Float): String? {
+        val pieza = documento.buscar(id) ?: return null
+        val contrato = pieza.contratoOrganico ?: return null
+        if (pieza.tipo != TipoPieza.ESCULTURA) return null
+        val acumulado = documento.transformDelPadreDe(id)?.componer(pieza.transform) ?: pieza.transform
+        val local = acumulado.worldToLocal(Vec3(x, y, z))
+        return MotorOrganico.parteEnPunto(contrato, local.x, local.y, local.z)
+    }
+
+    // -------------------------------------------------- perfiles
 
     fun formasDePerfil(): List<String> = FormaDePerfil.entries.map { it.name }
 
@@ -1038,9 +1602,75 @@ class Editor(inicial: Documento = Documento.vacio()) {
         }
     }
 
+    /**
+     * Añade un cable —tubo de radio variable sobre una polilínea 3D— como pieza
+     * paramétrica del documento.
+     *
+     * Es el mismo nodo que las curvas del motor orgánico, pero aquí la curva es de
+     * las de siempre: editable, transformable, taladrable, exportable con su
+     * certificado y deshacible en un paso. Los radios viajan punto a punto; el último
+     * puede ser 0 para afilar la punta, y un radio intermedio a 0 no se acepta porque
+     * no es una punta sino una curva partida en dos.
+     */
+    fun anadirCable(
+        puntos: List<Vec3>,
+        radios: List<Float>,
+        nombre: String = "Cable",
+        padreId: String? = null,
+    ): Boolean {
+        if (puntos.size < 2) return rechazar("Un cable necesita al menos dos puntos")
+        if (puntos.size > Cordon.MAXIMO_DE_PUNTOS) {
+            return rechazar("Un cable admite hasta ${Cordon.MAXIMO_DE_PUNTOS} puntos; llegaron ${puntos.size}")
+        }
+        if (radios.size != puntos.size) {
+            return rechazar("Cada punto del cable necesita su radio: ${puntos.size} puntos, ${radios.size} radios")
+        }
+        if (puntos.any { !it.x.isFinite() || !it.y.isFinite() || !it.z.isFinite() }) {
+            return rechazar("Un punto del cable no es un punto: hay coordenadas infinitas o vacías")
+        }
+        if (radios.any { !it.isFinite() || it < 0f }) {
+            return rechazar("Un radio del cable es negativo o no es un número")
+        }
+        if (radios.dropLast(1).any { it <= 0f }) {
+            return rechazar("Solo el último radio puede ser 0: un radio intermedio parte el cable en dos")
+        }
+        val cable = Pieza.nueva(TipoPieza.CABLE, nombre).copy(
+            puntosDeCable = puntos,
+            radiosDeCable = radios,
+        )
+        val destino = destinoValidoPara(padreId ?: documento.raiz.id)
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(destino) { it.copy(hijos = it.hijos + cable) },
+                seleccionado = cable.id,
+            )
+        }
+    }
+
+    /**
+     * Reescribe la polilínea de un cable existente, como una sola edición deshacible.
+     *
+     * La curva se agarra punto a punto en el viewport o se pide de nuevo; los dos
+     * caminos acaban aquí, que es donde la validación vive una sola vez.
+     */
+    fun fijarCable(id: String, puntos: List<Vec3>, radios: List<Float>): Boolean {
+        val pieza = documento.buscar(id) ?: return rechazar("No existe la pieza $id")
+        if (pieza.tipo != TipoPieza.CABLE) return rechazar("${pieza.nombre} no es un cable")
+        val provisional = pieza.copy(puntosDeCable = puntos, radiosDeCable = radios)
+        if (!provisional.esCableValido) {
+            return rechazar("El cable nuevo no se puede construir")
+        }
+        return aplicar { doc ->
+            doc.copy(
+                raiz = doc.raiz.mapear(id) {
+                    it.copy(puntosDeCable = puntos, radiosDeCable = radios)
+                },
+            )
+        }
+    }
+
     /** Inserta una escultura semántica sin convertirla en una malla opaca. */
-    fun anadirEscultura(contratoCanonico: String, padreId: String? = null): Boolean {
-        val interpretado = MotorOrganico.interpretar(contratoCanonico)
+    fun anadirEscultura(contratoCanonico: String, padreId: String? = null): Boolean {        val interpretado = MotorOrganico.interpretar(contratoCanonico)
         val canonico = interpretado.contratoCanonico
             ?: return rechazar(interpretado.motivo ?: "Contrato orgánico inválido")
         if (MotorOrganico.nodoDeContrato(canonico) == null) {
@@ -1071,6 +1701,22 @@ class Editor(inicial: Documento = Documento.vacio()) {
                 it.copy(nombre = interpretado.nombre.ifBlank { it.nombre }, contratoOrganico = canonico)
             })
         }
+    }
+
+    /** Añade una escultura solo sobre el estado sobre el que se generó su propuesta. */
+    fun anadirEsculturaEnVersion(
+        contratoCanonico: String,
+        versionEsperada: Long,
+        padreId: String? = null,
+    ): Boolean {
+        if (versionDocumento != versionEsperada) return rechazar(DOCUMENTO_CAMBIADO)
+        return anadirEscultura(contratoCanonico, padreId)
+    }
+
+    /** Reemplaza una escultura solo sobre el estado sobre el que se generó su propuesta. */
+    fun reemplazarEsculturaEnVersion(id: String, contratoCanonico: String, versionEsperada: Long): Boolean {
+        if (versionDocumento != versionEsperada) return rechazar(DOCUMENTO_CAMBIADO)
+        return reemplazarEscultura(id, contratoCanonico)
     }
 
     /** Brocha esférica en coordenadas del mundo; se persiste como operación semántica. */
@@ -1860,8 +2506,11 @@ class Editor(inicial: Documento = Documento.vacio()) {
     /** Las medidas del mundo declaradas en este documento, en orden de alta. */
     fun medidas(): List<Medida> = documento.medidas
 
-    /** El encaje que gobierna una pieza, o `null` si su cota es libre. */
-    fun encajeDe(id: String): Encaje? = documento.buscar(id)?.encaje
+    /** El primer encaje que gobierna una pieza, o `null` si su cota es libre. */
+    fun encajeDe(id: String): Encaje? = documento.buscar(id)?.encajes?.firstOrNull()
+
+    /** Todas las declaraciones que gobiernan las cotas de una pieza. */
+    fun encajesDe(id: String): List<Encaje> = documento.buscar(id)?.encajes ?: emptyList()
 
     /**
      * Si tocar ese parámetro movería la cota que manda el encaje.
@@ -1881,7 +2530,7 @@ class Editor(inicial: Documento = Documento.vacio()) {
      */
     fun gobernadaPorEncaje(id: String, clave: String): Boolean {
         val pieza = documento.buscar(id) ?: return false
-        val encaje = pieza.encaje ?: return false
+        if (pieza.encajes.isEmpty()) return false
         val ensayo = documento.copy(
             raiz = documento.raiz.mapear(id) {
                 // Un valor de prueba claramente distinto del actual, para que el efecto
@@ -1889,9 +2538,11 @@ class Editor(inicial: Documento = Documento.vacio()) {
                 it.copy(parametros = it.parametros + (clave to (it.parametro(clave) + 1f)))
             },
         )
-        val antes = documento.cotasEnMundoDe(id)?.let { extension(it, encaje.eje) } ?: return false
-        val despues = ensayo.cotasEnMundoDe(id)?.let { extension(it, encaje.eje) } ?: return false
-        return abs(despues - antes) > 1e-4f
+        return pieza.encajes.any { encaje ->
+            val antes = documento.cotasEnMundoDe(id)?.let { extension(it, encaje.eje) } ?: return@any false
+            val despues = ensayo.cotasEnMundoDe(id)?.let { extension(it, encaje.eje) } ?: return@any false
+            abs(despues - antes) > 1e-4f
+        }
     }
 
     /** El nombre del perfil de fabricación vigente: el que fija todas las holguras. */
@@ -1963,10 +2614,11 @@ class Editor(inicial: Documento = Documento.vacio()) {
             medidas = documento.medidas.map { if (it.id == id) it.copy(valor = valor) else it },
         )
         for ((pieza, _) in propuesto.raiz.aplanar()) {
-            val encaje = pieza.encaje ?: continue
-            if (encaje.medida != id) continue
-            propuesto.motivoParaNoEncajar(encaje, perfil)?.let {
-                return rechazar("«${pieza.nombre}» no podría encajar: $it")
+            for (encaje in pieza.encajes) {
+                if (encaje.medida != id) continue
+                propuesto.motivoParaNoEncajar(encaje, perfil)?.let {
+                    return rechazar("«${pieza.nombre}» no podría encajar: $it")
+                }
             }
         }
         aplicar { propuesto }
@@ -1982,8 +2634,8 @@ class Editor(inicial: Documento = Documento.vacio()) {
      */
     fun soltarEncaje(piezaId: String): Boolean {
         val pieza = documento.buscar(piezaId) ?: return rechazar("No existe la pieza $piezaId")
-        if (pieza.encaje == null) return rechazar("«${pieza.nombre}» no tiene ningún encaje")
-        aplicar { doc -> doc.copy(raiz = doc.raiz.mapear(piezaId) { it.copy(encaje = null) }) }
+        if (pieza.encajes.isEmpty()) return rechazar("«${pieza.nombre}» no tiene ningún encaje")
+        aplicar { doc -> doc.copy(raiz = doc.raiz.mapear(piezaId) { it.copy(encajes = emptyList()) }) }
         return ultimoError == null
     }
 
@@ -1995,7 +2647,7 @@ class Editor(inicial: Documento = Documento.vacio()) {
      * archivo dentro de un mes siga teniendo sentido.
      */
     fun descripcionDeEncaje(piezaId: String): String? {
-        val encaje = documento.buscar(piezaId)?.encaje ?: return null
+        val encaje = documento.buscar(piezaId)?.encajes?.firstOrNull() ?: return null
         val medida = documento.medidaDe(encaje.medida) ?: return null
         val perfil = perfilActivo()
         return "${encaje.sentido.etiqueta} ${medida.descripcion()} · holgura " +
@@ -2046,11 +2698,28 @@ class Editor(inicial: Documento = Documento.vacio()) {
         eje: EjeNombrado = EjeNombrado.X,
         sentido: SentidoDeEncaje = SentidoDeEncaje.ENTRA,
         clase: ClaseDeAjuste = ClaseDeAjuste.DESLIZANTE,
+        porParametro: Boolean = false,
     ): Boolean {
         val pieza = documento.buscar(piezaId) ?: return rechazar("No existe la pieza $piezaId")
-        val encaje = Encaje(medidaId, eje, sentido, clase)
+        val encaje = Encaje(medidaId, eje, sentido, clase, porParametro = porParametro)
         documento.motivoParaNoEncajar(encaje, perfilActivo())?.let {
             return rechazar("«${pieza.nombre}» no puede encajar: $it")
+        }
+        if (porParametro) {
+            if (pieza.parametroQueGobierna(eje) == null) {
+                return rechazar(
+                    "«${pieza.nombre}» no tiene un parámetro que gobierne $eje; " +
+                        "su encaje se derivaría por escala",
+                )
+            }
+            // Mezclar modos en una pieza haría que la escala del encaje viejo pisara al
+            // por parámetro, o al revés: o todos por parámetro o ninguno.
+            if (pieza.encajes.any { !it.porParametro }) {
+                return rechazar(
+                    "«${pieza.nombre}» ya deriva sus cotas por escala; suéltalas antes de " +
+                        "declarar una por parámetro",
+                )
+            }
         }
         val cotas = documento.cotasEnMundoDe(piezaId)
             ?: return rechazar("No se pueden medir las cotas de «${pieza.nombre}»")
@@ -2062,7 +2731,7 @@ class Editor(inicial: Documento = Documento.vacio()) {
         if (actual <= 1e-4f) {
             return rechazar("«${pieza.nombre}» no mide nada en $eje; elige otro eje")
         }
-        aplicar { doc -> doc.copy(raiz = doc.raiz.mapear(piezaId) { it.copy(encaje = encaje) }) }
+        aplicar { doc -> doc.copy(raiz = doc.raiz.mapear(piezaId) { it.copy(encajes = it.encajes + encaje) }) }
         return ultimoError == null
     }
 
@@ -2103,6 +2772,12 @@ class Editor(inicial: Documento = Documento.vacio()) {
         // procedencia que nadie ha comprobado.
         val nueva = Medida(idMedida, nombre, medida, ProcedenciaDeMedida.A_OJO)
         val encaje = Encaje(idMedida, eje, sentido, clase)
+        if (pieza.encajes.any { it.porParametro }) {
+            return rechazar(
+                "«${pieza.nombre}» deriva sus cotas por parámetro; decláralo con " +
+                    "declararEncaje en vez de escalarla",
+            )
+        }
 
         val propuesto = documento.copy(medidas = documento.medidas + nueva)
         propuesto.motivoParaNoEncajar(encaje, perfilActivo())?.let {
@@ -2122,7 +2797,7 @@ class Editor(inicial: Documento = Documento.vacio()) {
         aplicar { doc ->
             doc.copy(
                 medidas = doc.medidas + nueva,
-                raiz = doc.raiz.mapear(id) { it.copy(encaje = encaje) },
+                raiz = doc.raiz.mapear(id) { it.copy(encajes = it.encajes + encaje) },
             )
         }
         return ultimoError == null
@@ -2859,13 +3534,92 @@ class Editor(inicial: Documento = Documento.vacio()) {
         if (ruta.lowercase().endsWith(".3mf")) exportarTresMf(ruta, resolucion, alAvanzar)
         else exportarStl(ruta, resolucion, alAvanzar)
 
+    /**
+     * Exporta una **placa** con varios cuerpos como 3MF multiobjeto: una pieza y su
+     * cupón, las variantes de un encaje, los cuerpos de un ensamblaje.
+     *
+     * Cada cuerpo se malla y pasa **su propio** certificado; si uno no es apto no se
+     * escribe nada y se nombra la pieza. Es la misma ley del archivo único —no se
+     * escribe lo que no pasa el examen— aplicada a la placa entera: entregar un
+     * paquete donde una de las piezas está rota sería exactamente el fallo callado
+     * que el certificado existe para evitar.
+     */
+    fun exportarPlacaTresMf(
+        ruta: String,
+        ids: List<String>,
+        resolucion: Float,
+        alAvanzar: ((Float) -> Unit)? = null,
+    ): List<Certificado>? {
+        if (ruta.isBlank()) return rechazarPlaca("No se dijo dónde guardar la placa")
+        if (!resolucion.isFinite() || resolucion <= 0f) return rechazarPlaca("La resolución de exportación no es válida")
+        if (ids.size < 2) return rechazarPlaca("Una placa necesita al menos dos cuerpos")
+        val piezas = ids.map { id ->
+            documento.buscar(id) ?: return rechazarPlaca("No existe la pieza $id")
+        }
+        if (piezas.any { it.id == documento.raiz.id }) {
+            return rechazarPlaca("La raíz no es un cuerpo de la placa: es el documento entero")
+        }
+        ultimoError = null
+        val objetos = ArrayList<TresMf.ObjetoDePlaca>(piezas.size)
+        val certificados = ArrayList<Certificado>(piezas.size)
+        for ((indice, pieza) in piezas.withIndex()) {
+            val nodo = pieza.compilar()
+                ?: return rechazarPlaca("${pieza.nombre} no aporta material: está oculta o vacía")
+            val exportador = Exportador(nodo)
+            exportador.alAvanzar = alAvanzar?.let { progreso ->
+                { avance: Float -> progreso((avance + indice) / piezas.size) }
+            }
+            val resultado = exportador.malladoExaminado(resolucion, resolucionUtil(nodo, 0f))
+                ?: return rechazarPlaca(
+                    "${pieza.nombre} no pasa el certificado a $resolucion mm; " +
+                        "la placa no se escribe con una pieza rota",
+                )
+            objetos.add(TresMf.ObjetoDePlaca(resultado.first, pieza.nombre))
+            certificados.add(resultado.second)
+        }
+        val paquete = TresMf.paqueteDePlaca(objetos, titulo = "Yunkil · placa")
+        if (!escribirArchivo(ruta, paquete)) {
+            return rechazarPlaca("No se pudo escribir $ruta")
+        }
+        return certificados
+    }
+
+    /**
+     * Escribe el informe de fabricación en Markdown, listo para el taller.
+     *
+     * Es el mismo informe que muestra la aplicación —y del que depende el
+     * certificado—, más lo que solo el documento sabe: la estimación de material, las
+     * interferencias de los ensamblajes declarados y las medidas de procedencia «a
+     * ojo», que se avisan a propósito porque son las menos fiables del proyecto.
+     */
+    fun exportarInformeMarkdown(ruta: String, perfilNombre: String? = null): Boolean {
+        val informe = analizarFabricacion(perfilNombre)
+            ?: return rechazar(ultimoError ?: "no se pudo analizar la pieza")
+        val notas = documento.raiz.aplanar().flatMap { (pieza, _) ->
+            pieza.encajes.mapNotNull { encaje ->
+                val medida = documento.medidaDe(encaje.medida) ?: return@mapNotNull null
+                if (medida.procedencia != ProcedenciaDeMedida.A_OJO) return@mapNotNull null
+                "«${pieza.nombre}» verifica su encaje contra «${medida.nombre}», que está dada " +
+                    "a ojo. Mídelo con calibre y sube la procedencia de la medida."
+            }
+        }
+        val texto = informe.aMarkdown(
+            estimacion = EstimacionDeImpresion.desde(informe.metricas.volumen, informe.perfil),
+            interferencias = verificarEnsamblajes(),
+            notas = notas,
+        )
+        if (!escribirArchivo(ruta, texto.encodeToByteArray())) {
+            return rechazar("No se pudo escribir $ruta")
+        }
+        return true
+    }
+
     private fun exportar(
         ruta: String,
         resolucion: Float,
         alAvanzar: ((Float) -> Unit)?,
         escribir: (Exportador, Float, Float) -> Certificado,
-    ): Certificado? {
-        if (ruta.isBlank()) return rechazarNulo("No se dijo dónde guardar la pieza")
+    ): Certificado? {        if (ruta.isBlank()) return rechazarNulo("No se dijo dónde guardar la pieza")
         if (!resolucion.isFinite() || resolucion <= 0f) return rechazarNulo("La resolución de exportación no es válida")
         val nodo = documento.compilar() ?: return rechazarNulo("El documento no tiene material que exportar")
         val celdas = yunkil.malla.estimarCeldas(nodo, resolucion)
@@ -2904,6 +3658,11 @@ class Editor(inicial: Documento = Documento.vacio()) {
     }
 
     private fun rechazarNulo(motivo: String): Certificado? {
+        ultimoError = motivo
+        return null
+    }
+
+    private fun rechazarPlaca(motivo: String): List<Certificado>? {
         ultimoError = motivo
         return null
     }
@@ -3485,7 +4244,7 @@ class Editor(inicial: Documento = Documento.vacio()) {
             return ResultadoDeAplicacion(
                 aplicadas = 0,
                 omitidas = emptyList(),
-                error = "El documento cambió; vuelve a generar la propuesta",
+                error = DOCUMENTO_CAMBIADO,
             )
         }
         return aplicarParte(plan, aceptadas, nombrePerfil)
@@ -3839,6 +4598,15 @@ class Editor(inicial: Documento = Documento.vacio()) {
 
     private companion object {
         const val PROFUNDIDAD_DEL_HISTORIAL = 200
+
+        /**
+         * El rechazo de toda aplicación ligada a la revisión que vio la IA.
+         *
+         * Va en una sola constante porque la aplicación lo busca por texto para
+         * decidir si el fallo se le cuenta al usuario como aviso o como resultado:
+         * duplicar la frase partiría esa detección el día que una se retocara.
+         */
+        const val DOCUMENTO_CAMBIADO = "El documento cambió; vuelve a generar la propuesta"
 
         /**
          * Cuánto puede desviarse la pieza de la cota pedida antes de tocarla.

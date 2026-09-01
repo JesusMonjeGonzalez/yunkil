@@ -3,6 +3,7 @@ package yunkil.doc
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
 import yunkil.ia.Conversacion
+import yunkil.ia.EjeNombrado
 import yunkil.ia.PlanDeModelado
 import yunkil.kernel.AcuerdoLocal
 import yunkil.kernel.Axis
@@ -13,6 +14,7 @@ import yunkil.kernel.CampoDeMalla
 import yunkil.kernel.Caja
 import yunkil.kernel.Capsula
 import yunkil.kernel.Cilindro
+import yunkil.kernel.Cordon
 import yunkil.kernel.Cono
 import yunkil.kernel.Diferencia
 import yunkil.kernel.Desfase
@@ -70,6 +72,18 @@ enum class TipoPieza(
      */
     MALLA("Malla importada", false, false),
     ESCULTURA("Escultura orgánica", false, false),
+
+    /**
+     * Un tubo de radio variable que recorre una polilínea 3D: cables, latiguillos,
+     * guías, conductos. Es el mismo nodo que ya usan las colas y cuernos del motor
+     * orgánico —[yunkil.kernel.Cordon]— pero como **pieza paramétrica del documento**:
+     * sus puntos y radios son datos editables y persisten como cualquier otra pieza.
+     *
+     * No tiene parámetros numéricos en el inspector: su forma son los puntos, y una
+     * curva no se agota en un `Map<String, Float>`. Se edita moviendo los puntos o
+     * volviendo a pedirla.
+     */
+    CABLE("Cable", false, false),
 
     UNION("Unión", true, true),
     DIFERENCIA("Diferencia", true, true),
@@ -131,6 +145,7 @@ enum class TipoPieza(
             // Su forma viene del archivo, no de mandos. Acotarla se hace con `acotar`
             // o con la escala, igual que cualquier otra pieza.
             MALLA, ESCULTURA -> emptyList()
+            CABLE -> emptyList()
             BARRIDO -> listOf(
                 p("radio", "Radio de la sección", 0.2f, 100f, 3f),
                 // Un tubo se dibuja abierto y un marco cerrado, y no hay forma de
@@ -279,6 +294,17 @@ data class Pieza(
     val puntos: List<Punto2> = emptyList(),
     /** De dónde salió una MALLA. Se guarda para poder volver a hornearla al abrir. */
     val rutaDeMalla: String? = null,
+
+    /**
+     * La polilínea 3D de un CABLE, aplanada como x,y,z por punto.
+     *
+     * Va en la pieza y no en parámetros porque una curva es una lista de puntos con
+     * su radio, no un mapa de números sueltos. El contorno libre de un perfil usa su
+     * propia lista de 2D; aquí lo que viaja es el eje del tubo en 3D.
+     */
+    val puntosDeCable: List<Vec3> = emptyList(),
+    /** Un radio por punto de [puntosDeCable]. El último puede ser 0 para afilar. */
+    val radiosDeCable: List<Float> = emptyList(),
     /**
      * El campo horneado. No se guarda en el archivo —son megas— y por eso al abrir un
      * proyecto llega a nulo: el editor lo vuelve a hornear desde [rutaDeMalla]. Si el
@@ -290,18 +316,76 @@ data class Pieza(
     /** Anatomía y brochas orgánicas canónicas; compilan al mismo SDF que el resto. */
     val contratoOrganico: String? = null,
     /**
-     * La cota de esta pieza está gobernada por un encaje contra una medida del mundo.
+     * Las declaraciones que gobiernan las cotas de esta pieza.
      *
-     * Mientras exista, su extensión en el eje declarado no es un número que alguien
-     * escribió: se deriva de la medida y del perfil de fabricación cada vez que
-     * cualquiera de los dos cambia. Ver [Encaje].
+     * Era un único encaje opcional y no había forma de atar dos cotas independientes:
+     * atar el diámetro de un cilindro movía su altura, porque la derivación escala
+     * uniformemente. Con una lista, una pieza puede llevar dos —o más— declaraciones,
+     * y con `Encaje.porParametro` cada una goberna **su** parámetro sin tocar los
+     * demás ejes.
+     *
+     * Desde el esquema 2. Los archivos del esquema 1 traen `encaje` singular y la
+     * migración lo mete en la lista; ver `FormatoYunkil.migrarDeUnoADos`.
      */
-    val encaje: Encaje? = null,
+    val encajes: List<Encaje> = emptyList(),
 ) {
     fun parametro(clave: String): Float =
         parametros[clave]
             ?: tipo.parametrosCon(forma).firstOrNull { it.clave == clave }?.defecto
             ?: 0f
+
+    /** Los invariantes del cordón, comprobados aquí una vez y no en cada `evaluar`. */
+    val esCableValido: Boolean
+        get() = puntosDeCable.size in 2..Cordon.MAXIMO_DE_PUNTOS &&
+            radiosDeCable.size == puntosDeCable.size &&
+            puntosDeCable.all { it.x.isFinite() && it.y.isFinite() && it.z.isFinite() } &&
+            radiosDeCable.all { it.isFinite() && it >= 0f } &&
+            radiosDeCable.dropLast(1).all { it > 0f }
+
+    /**
+     * El parámetro cuya edición mueve la extensión de la pieza en este eje, o `null`
+     * si no hay uno responsable claro.
+     *
+     * Es el mapa que permite gobernar **una cota por parámetro** en lugar de escalando
+     * la pieza entera: gobernar la altura de un cilindro por parámetro toca su
+     * `altura` y no mueve el diámetro, que es lo que una pieza que deba encajar por
+     * dos cotas independientes necesita. Donde el mapa devuelve `null` —un cono, cuyo
+     * ancho depende de dos radios a la vez, un toro, una escultura— la derivación por
+     * parámetro no está disponible y el encaje se queda con la escala uniforme.
+     */
+    fun parametroQueGobierna(eje: EjeNombrado): String? = when (tipo) {
+        TipoPieza.CAJA -> when (eje) {
+            EjeNombrado.X -> "anchura"
+            EjeNombrado.Y -> "altura"
+            EjeNombrado.Z -> "profundidad"
+        }
+        TipoPieza.CILINDRO -> when (eje) {
+            EjeNombrado.Y -> "altura"
+            else -> "radio"
+        }
+        // Una esfera cambia de tamaño entera: su radio gobierna los tres ejes a la vez.
+        TipoPieza.ESFERA -> "radio"
+        TipoPieza.CAPSULA -> when (eje) {
+            EjeNombrado.Y -> "altura"
+            else -> "radio"
+        }
+        TipoPieza.EXTRUSION -> when (eje) {
+            EjeNombrado.Y -> "altura"
+            EjeNombrado.X -> when (forma) {
+                FormaDePerfil.RECTANGULO -> "anchoPerfil"
+                FormaDePerfil.CIRCULO -> "radioPerfil"
+                FormaDePerfil.RANURA -> "largoPerfil"
+                else -> null
+            }
+            EjeNombrado.Z -> when (forma) {
+                FormaDePerfil.RECTANGULO -> "altoPerfil"
+                FormaDePerfil.CIRCULO -> "radioPerfil"
+                FormaDePerfil.RANURA -> "anchoPerfil"
+                else -> null
+            }
+        }
+        else -> null
+    }
 
     /**
      * El contorno acotado que le corresponde a esta pieza.
@@ -424,6 +508,8 @@ fun Pieza.compilar(): SdfNode? {
         TipoPieza.MALLA -> campoDeMalla
         TipoPieza.ESCULTURA -> contratoOrganico?.let(MotorOrganico::nodoDeContrato)
 
+        TipoPieza.CABLE -> if (esCableValido) Cordon(puntosDeCable, radiosDeCable) else null
+
         TipoPieza.BARRIDO -> perfil().takeIf { it.poligono.size >= 2 }?.let {
             Barrido(it, parametro("radio"), cerrado = parametro("cerrado") >= 0.5f)
         }
@@ -512,6 +598,22 @@ private inline fun combinar(hijos: List<Pieza>, unir: (SdfNode, SdfNode) -> SdfN
 // ------------------------------------------------------------------ documento
 
 /**
+ * Un conjunto de piezas que tienen que ir separadas y montarse después.
+ *
+ * [piezas] son identificadores del árbol. Puede haberlos que ya no existan al abrir
+ * un archivo viejo: eso se sanea al vuelo (ver `FormatoYunkil.sanear`) porque un
+ * ensamblaje cojo no estropea ninguna pieza.
+ */
+@Serializable
+data class Ensamblaje(
+    val id: String,
+    val nombre: String,
+    val piezas: List<String>,
+) {
+    fun descripcion(): String = "$nombre: ${piezas.size} cuerpos"
+}
+
+/**
  * El documento completo con su historial.
  *
  * El historial guarda instantáneas en lugar de operaciones inversas. Con un árbol
@@ -556,6 +658,20 @@ data class Documento(
      * pieza: el diámetro del tubo lo usan el tapón y la abrazadera. Ver [Medida].
      */
     val medidas: List<Medida> = emptyList(),
+    /**
+     * Los cuerpos que deben **ensamblar** entre sí.
+     *
+     * Esta es la decisión de diseño que pedía la prioridad de interferencias: en este
+     * documento no existe el concepto de cuerpo suelto —la raíz es una unión de todo y
+     * dos piezas que se solapan bajo una unión están bien, así es como se construye una
+     * pieza—, así que una interferencia solo puede existir **dentro de un ensamblaje
+     * declarado**. Nadie declara un ensamblaje para piezas que no tienen que ir
+     * separadas, y por eso un solape medido dentro de él es siempre un problema y no
+     * una técnica de modelado.
+     *
+     * Ver [yunkil.fabricacion.VerificadorDeEnsamblajes].
+     */
+    val ensamblajes: List<Ensamblaje> = emptyList(),
 ) {
     fun compilar(): SdfNode? = raiz.compilar()
 
@@ -572,7 +688,7 @@ data class Documento(
     }
 }
 
-const val VERSION_ESQUEMA_ACTUAL = 1
+const val VERSION_ESQUEMA_ACTUAL = 2
 
 fun Pieza.buscar(id: String): Pieza? {
     if (this.id == id) return this

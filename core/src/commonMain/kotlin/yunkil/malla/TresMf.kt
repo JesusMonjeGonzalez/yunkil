@@ -97,6 +97,87 @@ object TresMf {
         Vec3(v.x + desplazamiento.x, -v.z + desplazamiento.y, v.y + desplazamiento.z)
 
     /**
+     * Una pieza de la placa: su malla y el nombre que la identifica en el laminador.
+     */
+    data class ObjetoDePlaca(val malla: Malla, val nombre: String)
+
+    /**
+     * El paquete 3MF de una **placa con varios objetos**: una pieza y su cupón de
+     * calibración, las variantes de un encaje, un ensamblaje entero. Cada objeto
+     * mantiene su identidad en el laminador —nombre propio, ajustes por pieza—, que
+     * es justo lo que un STL o un 3MF de un solo objeto no pueden dar.
+     *
+     * Las piezas se colocan en fila sobre la base del plato, separadas un margen de
+     * seguridad, porque un laminador no separa lo que llega solapado y el objetivo
+     * es poder imprimir la placa sin retocar nada.
+     */
+    fun paqueteDePlaca(objetos: List<ObjetoDePlaca>, titulo: String = "Yunkil"): ByteArray = Zip.de(
+        listOf(
+            "[Content_Types].xml" to TIPOS_DE_CONTENIDO.encodeToByteArray(),
+            "_rels/.rels" to RELACIONES.encodeToByteArray(),
+            PARTE_MODELO to modeloDePlaca(objetos, titulo).encodeToByteArray(),
+        ),
+    )
+
+    /**
+     * El XML de la placa. Público por el mismo motivo que [modelo]: comprobar la
+     * conversión de ejes y el reparto de la placa contra el texto es directo, y
+     * hacerlo contra un ZIP obliga a descomprimir en una prueba que también corre
+     * en iOS.
+     */
+    fun modeloDePlaca(objetos: List<ObjetoDePlaca>, titulo: String = "Yunkil"): String {
+        // Cada objeto sale con la base en z = 0, como el de un solo objeto, y se
+        // reparte en X: el ancho de cada uno más un margen de 6 mm, que es un dedo
+        // razonable entre piezas que habrá que separar y probar.
+        var origenX = 0f
+        val colocadas = objetos.map { objeto ->
+            val cotas = objeto.malla.cotas()
+            val ancho = (cotas.max.x - cotas.min.x).coerceAtLeast(0f)
+            val desplazamiento = Vec3(origenX - cotas.min.x, cotas.max.z, -cotas.min.y)
+            origenX += ancho + 6f
+            objeto to desplazamiento
+        }
+
+        val sb = StringBuilder()
+        sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+        sb.append(
+            "<model unit=\"millimeter\" xml:lang=\"en-US\" " +
+                "xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n",
+        )
+        sb.append(" <metadata name=\"Application\">Yunkil</metadata>\n")
+        sb.append(" <metadata name=\"Title\">").append(escapar(titulo)).append("</metadata>\n")
+        sb.append(" <resources>\n")
+        for ((indice, colocada) in colocadas.withIndex()) {
+            val (objeto, desplazamiento) = colocada
+            val id = indice + 1
+            sb.append("  <object id=\"").append(id).append("\" type=\"model\" name=\"")
+                .append(escapar(objeto.nombre)).append("\">\n   <mesh>\n    <vertices>\n")
+            for (i in 0 until objeto.malla.numeroDeVertices) {
+                val v = enPlato(objeto.malla.vertice(i), desplazamiento)
+                sb.append("     <vertex x=\"").append(numero(v.x))
+                    .append("\" y=\"").append(numero(v.y))
+                    .append("\" z=\"").append(numero(v.z)).append("\"/>\n")
+            }
+            sb.append("    </vertices>\n    <triangles>\n")
+            for (t in 0 until objeto.malla.numeroDeTriangulos) {
+                sb.append("     <triangle v1=\"").append(objeto.malla.triangulos[t * 3])
+                    .append("\" v2=\"").append(objeto.malla.triangulos[t * 3 + 1])
+                    .append("\" v3=\"").append(objeto.malla.triangulos[t * 3 + 2]).append("\"/>\n")
+            }
+            sb.append("    </triangles>\n   </mesh>\n  </object>\n")
+        }
+        sb.append(" </resources>\n")
+        sb.append(" <build>\n")
+        for (indice in colocadas.indices) {
+            // Los vértices ya viajan colocados: el ítem no lleva transformación y el
+            // laminador lee la placa tal cual está escrita.
+            sb.append("  <item objectid=\"").append(indice + 1).append("\"/>\n")
+        }
+        sb.append(" </build>\n</model>\n")
+        return sb.toString()
+    }
+
+    /**
      * Número con cuatro decimales y sin notación científica.
      *
      * `toString()` de un flotante pequeño da `1.0E-5`, y aunque el esquema del 3MF lo

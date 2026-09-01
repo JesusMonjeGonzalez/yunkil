@@ -29,6 +29,25 @@ data class PatronDeMontaje(
 
 object Estandares {
 
+    // ---------------------------------------------------- holgura proporcional
+
+    /**
+     * La fracción del diámetro nominal que pide cada clase de ajuste, por lado.
+     *
+     * No es ISO 286 ni pretende serlo: es la regla de ajuste de las guías FDM, que
+     * expresan la holgura como fracción del diámetro porque el error de la máquina
+     * crece con el tamaño de la pieza. Un agujero de 20 mm y uno de 120 impresos con
+     * la misma boquilla no llevan la misma holgura absoluta. El piso de la máquina —
+     * lo que midió el cupón— manda cuando el diámetro es pequeño; esta fracción manda
+     * cuando es grande. Ver `Encaje.holguraEfectiva`.
+     */
+    fun fraccionDeAjuste(clase: yunkil.doc.ClaseDeAjuste): Float = when (clase) {
+        yunkil.doc.ClaseDeAjuste.PRESION -> 0f
+        yunkil.doc.ClaseDeAjuste.AJUSTADO -> 0.0025f
+        yunkil.doc.ClaseDeAjuste.DESLIZANTE -> 0.005f
+        yunkil.doc.ClaseDeAjuste.LIBRE -> 0.01f
+    }
+
     // ---------------------------------------------------------------- rack 19"
 
     /** Altura de una unidad de rack: 1,75 pulgadas. */

@@ -21,12 +21,12 @@ class FormatoYunkilTest {
     fun `un documento historico sin version migra al esquema actual`() {
         val original = Editor(Documento.vacio())
         original.anadir("CAJA", null)
-        val historico = original.aJson().replace(Regex("\\s*\"versionEsquema\": 1,"), "")
+        val historico = original.aJson().replace(Regex("\\s*\"versionEsquema\": \\$VERSION_ESQUEMA_ACTUAL,"), "")
         val abierto = Editor(Documento.vacio())
 
         assertTrue(abierto.desdeJson(historico), abierto.ultimoError)
         assertEquals(original.cotaMaxima, abierto.cotaMaxima)
-        assertTrue("\"versionEsquema\": 1" in abierto.aJson())
+        assertTrue("\"versionEsquema\": $VERSION_ESQUEMA_ACTUAL" in abierto.aJson())
     }
 
     @Test
@@ -34,7 +34,7 @@ class FormatoYunkilTest {
         val editor = Editor(Documento.vacio())
         editor.anadir("ESFERA", null)
         val antes = editor.aJson()
-        val futuro = antes.replace("\"versionEsquema\": 1", "\"versionEsquema\": 999")
+        val futuro = antes.replace("\"versionEsquema\": $VERSION_ESQUEMA_ACTUAL", "\"versionEsquema\": 999")
 
         assertFalse(editor.desdeJson(futuro))
         assertTrue(editor.ultimoError?.contains("esquema 999") == true)

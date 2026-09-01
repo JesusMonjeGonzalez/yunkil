@@ -3,8 +3,13 @@ package yunkil.doc
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -35,6 +40,7 @@ object FormatoYunkil {
         while (version < VERSION_ESQUEMA_ACTUAL) {
             objeto = when (version) {
                 0 -> migrarDeCeroAUno(objeto)
+                1 -> migrarDeUnoADos(objeto)
                 else -> error("No existe migración desde el esquema $version")
             }
             version++
@@ -65,11 +71,24 @@ object FormatoYunkil {
      * pieza; eso se cuenta y se rechaza.
      */
     private fun sanear(documento: Documento): Documento {
-        val seleccion = documento.seleccionado
-        if (seleccion != null && documento.buscar(seleccion) == null) {
-            return documento.copy(seleccionado = null)
+        var doc = documento
+        val seleccion = doc.seleccionado
+        if (seleccion != null && doc.buscar(seleccion) == null) {
+            doc = doc.copy(seleccionado = null)
         }
-        return documento
+        // Un ensamblaje que nombra piezas que ya no están pierde esas referencias, y
+        // si le quedan menos de dos cuerpos deja de ser un ensamblaje. Quedarse con
+        // referencias muertas haría que el verificador midiera pares contra `null`.
+        if (doc.ensamblajes.isNotEmpty()) {
+            val vivos = doc.raiz.aplanar().map { it.first.id }.toSet()
+            doc = doc.copy(
+                ensamblajes = doc.ensamblajes.mapNotNull { ensamblaje ->
+                    val piezas = ensamblaje.piezas.filter { it in vivos }
+                    if (piezas.size >= 2) ensamblaje.copy(piezas = piezas) else null
+                },
+            )
+        }
+        return doc
     }
 
     /**
@@ -108,12 +127,37 @@ object FormatoYunkil {
             }
         }
         for (pieza in piezas) {
-            val encaje = pieza.encaje ?: continue
-            if (encaje.medida !in medidasVistas) {
-                // Callarse y seguir dejaría una pieza que dice encajar con algo que nadie
-                // sabe cuánto mide: su cota deja de poder derivarse y de poder explicarse.
-                return "«${pieza.nombre}» encaja contra la medida «${encaje.medida}», " +
-                    "que no está en el archivo"
+            for (encaje in pieza.encajes) {
+                if (encaje.medida !in medidasVistas) {
+                    // Callarse y seguir dejaría una pieza que dice encajar con algo que
+                    // nadie sabe cuánto mide: su cota deja de poder derivarse ni
+                    // explicarse.
+                    return "«${pieza.nombre}» encaja contra la medida «${encaje.medida}», " +
+                        "que no está en el archivo"
+                }
+                if (encaje.porParametro && pieza.parametroQueGobierna(encaje.eje) == null) {
+                    return "«${pieza.nombre}» gobierna $encaje.eje por parámetro, pero la pieza " +
+                        "no tiene un parámetro responsable de ese eje"
+                }
+            }
+            // Mezclar modos en una pieza no es una ambigüedad: la escala del encaje de
+            // escala pisaría al que gobierna por parámetro.
+            if (pieza.encajes.any { it.porParametro } && pieza.encajes.any { !it.porParametro }) {
+                return "«${pieza.nombre}» mezcla encajes por parámetro y por escala"
+            }
+        }
+
+        // Los ensamblajes van después de las piezas porque solo las nombran: un
+        // identificador repetido aquí sería un ensamblaje que mide pares distintos
+        // según el orden del archivo.
+        val ensamblajesVistos = HashSet<String>(documento.ensamblajes.size)
+        for (ensamblaje in documento.ensamblajes) {
+            if (ensamblaje.id.isBlank()) return "Hay un ensamblaje sin identificador"
+            if (!ensamblajesVistos.add(ensamblaje.id)) {
+                return "El identificador de ensamblaje «${ensamblaje.id}» está repetido"
+            }
+            if (ensamblaje.piezas.size < 2) {
+                return "El ensamblaje «${ensamblaje.nombre}» tiene ${ensamblaje.piezas.size} cuerpos"
             }
         }
 
@@ -149,6 +193,11 @@ object FormatoYunkil {
             if (pieza.forma == FormaDePerfil.LIBRE && pieza.puntos.size < 3) {
                 return "«${pieza.nombre}» tiene un contorno libre de ${pieza.puntos.size} puntos"
             }
+            if (pieza.tipo == TipoPieza.CABLE && !pieza.esCableValido) {
+                return "«${pieza.nombre}» lleva un cable que no se puede construir: " +
+                    "de 2 a ${yunkil.kernel.Cordon.MAXIMO_DE_PUNTOS} puntos, un radio finito y " +
+                    "positivo por punto, y solo el último puede ser 0"
+            }
         }
 
         return try {
@@ -162,4 +211,34 @@ object FormatoYunkil {
     /** Los documentos anteriores al versionado ya tenían la estructura del esquema 1. */
     private fun migrarDeCeroAUno(objeto: JsonObject): JsonObject =
         JsonObject(objeto + ("versionEsquema" to JsonPrimitive(1)))
+
+    /**
+     * Esquema 1 → 2: el `encaje` singular de cada pieza pasa a la lista `encajes`.
+     *
+     * Una pieza ya puede llevar varias declaraciones —para gobernar dos cotas
+     * independientes—, y una lista de cero o un elemento reproduce exactamente lo que
+     * había. El recorrido es sobre el JSON porque las clases del esquema 2 ya no
+     * entenderían el campo viejo; entra por el árbol entero, que las piezas van
+     * anidadas.
+     */
+    private fun migrarDeUnoADos(objeto: JsonObject): JsonObject {
+        val raiz = objeto["raiz"] ?: return objeto
+        return JsonObject(
+            objeto + ("versionEsquema" to JsonPrimitive(2)) +
+                ("raiz" to migrarEncajeALista(raiz)),
+        )
+    }
+
+    private fun migrarEncajeALista(elemento: JsonElement): JsonElement = when (elemento) {
+        is JsonObject -> {
+            val base = elemento.toMutableMap()
+            val encaje = base.remove("encaje")
+            if (encaje != null && encaje !is JsonNull) {
+                base["encajes"] = buildJsonArray { add(encaje) }
+            }
+            JsonObject(base.mapValues { (_, v) -> migrarEncajeALista(v) })
+        }
+        is JsonArray -> JsonArray(elemento.map(::migrarEncajeALista))
+        else -> elemento
+    }
 }

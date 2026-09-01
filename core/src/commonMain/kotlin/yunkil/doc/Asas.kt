@@ -120,6 +120,8 @@ val TipoPieza.asas: Map<Asa, String>
         TipoPieza.BARRIDO,
         TipoPieza.MALLA,
         TipoPieza.ESCULTURA,
+        // La forma de un cable son sus puntos; no hay un número al que tirar.
+        TipoPieza.CABLE,
         TipoPieza.UNION,
         TipoPieza.DIFERENCIA,
         TipoPieza.INTERSECCION,

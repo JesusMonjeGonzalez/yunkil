@@ -230,6 +230,27 @@ object MotorOrganico {
         )
     }
 
+    /**
+     * El mensaje que lleva el rechazo de un contrato de vuelta al modelo.
+     *
+     * Es el equivalente orgánico de la corrección del plan paramétrico, y va aquí y
+     * no en la aplicación por la misma razón que [instrucciones]: lo que le dice el
+     * modelo en una segunda ronda tiene que hablar el idioma del contrato, y quien
+     * define ese idioma es este motor. La respuesta anterior viaja recortada porque
+     * un contrato desbocado —la forma habitual de fallar— no sirve de nada releerlo
+     * entero, y el presupuesto de salida es finito.
+     */
+    fun correccionParaModelo(motivo: String, respuestaAnterior: String): String = """
+        Tu contrato anterior fue rechazado por este motivo:
+        $motivo
+
+        Corrígelo siguiendo exactamente el esquema de las instrucciones.
+        Devuelve el contrato COMPLETO, no un parche ni una diferencia.
+
+        Contrato rechazado:
+        ${respuestaAnterior.take(2000)}
+    """.trimIndent()
+
     fun generarStl(
         contratoCanonico: String,
         ruta: String,
@@ -260,6 +281,151 @@ object MotorOrganico {
         if (validar(contrato) != null) return null
         return try { compilar(contrato) } catch (_: Exception) { null }
     }
+
+    // ------------------------------------------------- edición semántica de partes
+
+    /**
+     * Edita una parte del contrato por su identificador semántico.
+     *
+     * Es el corazón de la modificación directa de partes orgánicas: mover la cola o
+     * engordar el cuerno no debería exigir reescribir el contrato entero ni volver a
+     * pedírselo a la IA —el identificador ya dice qué es qué—. El cambio lo valida el
+     * mismo validador que aceptó el contrato original: si la parte editada deja de
+     * tocar a su padre, se rechaza con el motivo y nadie aplica nada.
+     *
+     * Devuelve el contrato editado ya canónico, o el motivo del rechazo.
+     */
+    fun editarParte(
+        contratoCanonico: String,
+        parteId: String,
+        cambio: (ParteOrganica) -> ParteOrganica,
+    ): ResultadoContratoOrganico {
+        val contrato = leer(contratoCanonico) ?: return rechazo("Contrato orgánico inválido")
+        val parte = contrato.partes.firstOrNull { it.id == parteId }
+            ?: return rechazo("No existe la parte «$parteId» en «${contrato.nombre}»")
+        val modificado = contrato.copy(
+            partes = contrato.partes.map { if (it.id == parteId) cambio(parte) else it },
+        )
+        validar(modificado)?.let { return rechazo(it) }
+        return aceptar(modificado)
+    }
+
+    /**
+     * Mueve una parte entera —esfera, cápsula, tronco o los puntos de una curva— en
+     * milímetros del espacio local de la escultura. Es el mismo espacio de las brochas:
+     * quien mueva desde el mundo convierte antes, igual que ellas.
+     */
+    fun moverParte(
+        contratoCanonico: String,
+        parteId: String,
+        dx: Float,
+        dy: Float,
+        dz: Float,
+    ): ResultadoContratoOrganico = editarParte(contratoCanonico, parteId) { p ->
+        when (p.forma) {
+            FormaOrganica.ESFERA -> p.copy(centro = desplazado(p.centro, dx, dy, dz))
+            FormaOrganica.CAPSULA, FormaOrganica.TRONCO -> p.copy(
+                a = desplazado(p.a, dx, dy, dz),
+                b = desplazado(p.b, dx, dy, dz),
+            )
+            FormaOrganica.CURVA -> p.copy(puntos = desplazadoTripleta(p.puntos, dx, dy, dz))
+        }
+    }
+
+    /**
+     * Engorda —o afina, con delta negativo— una parte tocando solo sus radios: el eje
+     * no se mueve. La punta de una curva, cuyo radio puede ser 0 a propósito, sigue
+     * pudiendo estar a 0 con el delta negativo.
+     */
+    fun engordarParte(
+        contratoCanonico: String,
+        parteId: String,
+        deltaMm: Float,
+    ): ResultadoContratoOrganico = editarParte(contratoCanonico, parteId) { p ->
+        when (p.forma) {
+            FormaOrganica.ESFERA, FormaOrganica.CAPSULA -> p.copy(
+                radio = (p.radio + deltaMm).coerceAtLeast(0.1f),
+            )
+            FormaOrganica.TRONCO -> p.copy(
+                radioA = (p.radioA + deltaMm).coerceAtLeast(0.1f),
+                radioB = (p.radioB + deltaMm).coerceAtLeast(0.1f),
+            )
+            FormaOrganica.CURVA -> p.copy(
+                radios = p.radios.mapIndexed { indice, radio ->
+                    (radio + deltaMm).coerceAtLeast(if (indice == p.radios.lastIndex) 0f else 0.1f)
+                },
+            )
+        }
+    }
+
+    /**
+     * Quita una parte y **reataja** a las que colgaban de ella.
+     *
+     * Si una oreja se quita, los detalles que le salían de ella pasan a colgar de lo
+     * que sostenía a la oreja; sin eso, quitar una parte intermedia rompería media
+     * figura por contactos que ya no se cumplen. El cuerpo no se quita: es el único
+     * obligatorio y sin él no hay figura que sostener.
+     */
+    fun quitarParte(contratoCanonico: String, parteId: String): ResultadoContratoOrganico {
+        val contrato = leer(contratoCanonico) ?: return rechazo("Contrato orgánico inválido")
+        val parte = contrato.partes.firstOrNull { it.id == parteId }
+            ?: return rechazo("No existe la parte «$parteId»")
+        if (parte.rol == RolOrganico.CUERPO) {
+            return rechazo("El cuerpo sostiene la figura y no se puede quitar")
+        }
+        val restantes = contrato.partes
+            .filter { it.id != parteId }
+            .map { if (it.unidoA == parteId) it.copy(unidoA = parte.unidoA) else it }
+        val modificado = contrato.copy(partes = restantes)
+        validar(modificado)?.let { return rechazo(it) }
+        return aceptar(modificado)
+    }
+
+    /**
+     * Qué parte hay bajo un punto, en el espacio local de la escultura.
+     *
+     * Devuelve el identificador de la parte cuyo material está más cerca del punto —
+     * dentro de [tolerancia] mm—, que es lo que necesita una selección por clic sobre
+     * la anatomía. Se evalúa la parte en su nodo propio, sin fusiones ni brochas: un
+     * punto en un empalme muy fundido se la apunta a la parte cuyo sólido está debajo,
+     * que es la respuesta que quien edita espera.
+     */
+    fun parteEnPunto(
+        contratoCanonico: String,
+        x: Float,
+        y: Float,
+        z: Float,
+        tolerancia: Float = 0.5f,
+    ): String? {
+        val contrato = leer(contratoCanonico) ?: return null
+        val punto = Vec3(x, y, z)
+        var mejor: Pair<String, Float>? = null
+        for (parte in contrato.partes) {
+            val d = try { nodoDe(parte).evaluar(punto) } catch (_: Exception) { continue }
+            if (d <= tolerancia && (mejor == null || d < mejor.second)) mejor = parte.id to d
+        }
+        return mejor?.first
+    }
+
+    private fun aceptar(contrato: ContratoOrganico): ResultadoContratoOrganico {
+        val canonico = json.encodeToString(contrato)
+        if (nodoDeContrato(canonico) == null) {
+            return rechazo("La anatomía editada no produce geometría válida")
+        }
+        return ResultadoContratoOrganico(aceptado = true, contratoCanonico = canonico, nombre = contrato.nombre)
+    }
+
+    private fun desplazado(v: List<Float>, dx: Float, dy: Float, dz: Float): List<Float> =
+        if (v.size != 3) v else listOf(v[0] + dx, v[1] + dy, v[2] + dz)
+
+    private fun desplazadoTripleta(v: List<Float>, dx: Float, dy: Float, dz: Float): List<Float> =
+        v.mapIndexed { indice, valor ->
+            when (indice % 3) {
+                0 -> valor + dx
+                1 -> valor + dy
+                else -> valor + dz
+            }
+        }
 
     /**
      * Añade una esfera de escultura y devuelve un contrato validado y canónico.

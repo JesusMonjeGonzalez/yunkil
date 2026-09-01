@@ -129,13 +129,39 @@ class Exportador(private val nodo: SdfNode) {
         TresMf.paquete(malla, titulo)
     }
 
+    /**
+     * La malla a una resolución con su certificado, **sin escribir ningún archivo**.
+     *
+     * Es la pieza que necesita una placa de varios objetos: cada cuerpo se malla y se
+     * examina por su cuenta, y solo cuando todos pasan se empaquetan juntos. Mismo
+     * examen, mismo reintento a doble detalle que la exportación a archivo; lo único
+     * que no hay es disco.
+     *
+     * `null` con la malla no apta: quien llama decide contarlo, pero una malla que
+     * no supera el certificado nunca cruza esta función.
+     */
+    fun malladoExaminado(resolucion: Float, resolucionMinima: Float = 0f): Pair<Malla, Certificado>? {
+        var actual = resolucion
+        var intento = 0
+        while (true) {
+            val malla = ContorneadoDual(nodo, actual).generar()
+            val certificado = examinar(malla, actual, 0)
+            if (!certificado.apto && intento == 0 && actual * 0.5f >= resolucionMinima) {
+                intento++
+                actual *= 0.5f
+                continue
+            }
+            if (!certificado.apto) return null
+            return malla to certificado
+        }
+    }
+
     private fun exportar(
         ruta: String,
         resolucion: Float,
         resolucionMinima: Float,
         empaquetar: (Malla, Float) -> ByteArray,
-    ): Certificado {
-        var actual = resolucion
+    ): Certificado {        var actual = resolucion
         var intento = 0
 
         while (true) {

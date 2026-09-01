@@ -58,9 +58,20 @@ data class Medida(
     val nombre: String,
     val valor: Float,
     val procedencia: ProcedenciaDeMedida = ProcedenciaDeMedida.A_OJO,
+    /**
+     * Cuánto puede valer menos o más que [valor] sin dejar de ser la misma medida,
+     * en mm. Un calibre de estuche mide ±0,02; un agujero desgastado, más. La
+     * incertidumbre no es un adorno: se come la holgura, y una holgura de 0,2 mm
+     * contra una medida incierta en ±0,3 no puede decirse que se cumpla.
+     */
+    val tolerancia: Float = 0f,
 ) {
-    /** Cómo se lee en el inspector: «Ø20,0 mm con calibre». */
-    fun descripcion(): String = "$nombre: ${redondeado(valor)} mm ${procedencia.etiqueta}"
+    /** Cómo se lee en el inspector: «Ø20,0 ±0,1 mm con calibre». */
+    fun descripcion(): String = buildString {
+        append("$nombre: ${redondeado(valor)} mm")
+        if (tolerancia > 0f) append(" ±${redondeado(tolerancia)}")
+        append(" ${procedencia.etiqueta}")
+    }
 }
 
 // ------------------------------------------------------------------- el encaje
@@ -109,6 +120,35 @@ data class Encaje(
     val eje: EjeNombrado = EjeNombrado.X,
     val sentido: SentidoDeEncaje = SentidoDeEncaje.ENTRA,
     val clase: ClaseDeAjuste = ClaseDeAjuste.DESLIZANTE,
+    /**
+     * Añade a la holgura una parte proporcional al diámetro, no solo el piso del perfil.
+     *
+     * La holgura fija del perfil —la que mide el cupón— es la buena para cotas de
+     * un par de centímetros, pero en un agujero de 100 mm las guías de ajuste FDM
+     * piden una fracción del diámetro, no un número constante: la misma holgura que
+     * en 20 mm es holgura sobra en 100, donde la pieza ya no entra. Con esta marca,
+     * la holgura efectiva es el mayor de los dos: el piso de la máquina y la parte
+     * proporcional que el diámetro pide.
+     *
+     * Va desactivada por omisión para que ningún archivo anterior cambie de cota.
+     */
+    val holguraProporcional: Boolean = false,
+    /**
+     * Gobierna la cota moviendo **un parámetro** de la pieza en lugar de escalándola.
+     *
+     * La derivación de siempre escala uniformemente, así que gobernar el diámetro de
+     * un cilindro le mueve también la altura: coherente con el sistema, pero deja
+     * fuera media mecánica. Con esta marca, la cota se deriva ajustando el parámetro
+     * responsable del eje —el `radio`, la `altura`, la `anchura`— y ningún otro número
+     * de la pieza se mueve. Una pieza que deba encajar por dos cotas independientes
+     * lleva dos encajes de este tipo: el diámetro y la altura, cada uno con su medida.
+     *
+     * Solo disponible donde hay un parámetro responsable claro
+     * (`Pieza.parametroQueGobierna`); un cono o una escultura no tienen uno, y lo
+     * dicho ahí vale. En una pieza, o todos sus encajes son por parámetro o ninguno
+     * lo es: mezclarlos haría que la escala del segundo pisara al primero.
+     */
+    val porParametro: Boolean = false,
 )
 
 // --------------------------------------------------------------- la resolución
@@ -117,13 +157,26 @@ data class Encaje(
 fun Encaje.holguraCon(perfil: PerfilFabricacion): Float = perfil.holguraEncaje * clase.factor
 
 /**
+ * La holgura efectiva cuando el encaje pide la parte proporcional al diámetro.
+ *
+ * Es siempre el **mayor** entre el piso de la máquina —lo que midió el cupón— y la
+ * fracción del diámetro que la clase de ajuste pide. Nunca resta: una holgura
+ * proporcional afloja, no aprieta, porque lo que corrige es justamente el caso en
+ * que el número fijo de la máquina se queda corto.
+ */
+fun Encaje.holguraEfectiva(nominal: Float, perfil: PerfilFabricacion): Float {
+    if (!holguraProporcional) return holguraCon(perfil)
+    return maxOf(holguraCon(perfil), nominal * yunkil.fabricacion.Estandares.fraccionDeAjuste(clase))
+}
+
+/**
  * La cota que debe tener la pieza para que el encaje se cumpla.
  *
  * Dos holguras, una por cada lado, que es la misma cuenta que ya hace
  * [yunkil.fabricacion.Roscas] para el agujero de paso.
  */
 fun Encaje.cotaDestino(nominal: Float, perfil: PerfilFabricacion): Float {
-    val margen = 2f * holguraCon(perfil)
+    val margen = 2f * holguraEfectiva(nominal, perfil)
     return when (sentido) {
         SentidoDeEncaje.ENTRA -> nominal - margen
         SentidoDeEncaje.RECIBE -> nominal + margen
@@ -140,12 +193,21 @@ fun Documento.motivoParaNoEncajar(encaje: Encaje, perfil: PerfilFabricacion): St
     val destino = encaje.cotaDestino(medida.valor, perfil)
     if (destino <= 0f) {
         return "con ${redondeado(medida.valor)} mm no queda nada después de descontar " +
-            "${redondeado(2f * encaje.holguraCon(perfil))} mm de holgura"
+            "${redondeado(2f * encaje.holguraEfectiva(medida.valor, perfil))} mm de holgura"
     }
     return null
 }
 
 fun Documento.medidaDe(id: String): Medida? = medidas.firstOrNull { it.id == id }
+
+/**
+ * El encaje de la pieza que manda sobre ese parámetro, para saber a quién culpar en un
+ * rechazo. Un encaje por parámetro manda si gobierna el eje de ese parámetro; un encaje
+ * por escala manda en toda la pieza, porque la escala mueve todos los ejes.
+ */
+fun Documento.encajeQueGobierna(pieza: Pieza, clave: String): Encaje? =
+    pieza.encajes.firstOrNull { it.porParametro && pieza.parametroQueGobierna(it.eje) == clave }
+        ?: pieza.encajes.firstOrNull()
 
 /**
  * Reescribe las cotas gobernadas por un encaje. Función pura sobre el documento.
@@ -162,34 +224,84 @@ fun Documento.medidaDe(id: String): Medida? = medidas.firstOrNull { it.id == id 
  * hecho nada.
  */
 fun Documento.resolverEncajes(perfil: PerfilFabricacion): Documento {
-    val conEncaje = raiz.aplanar().map { it.first }.filter { it.encaje != null }.map { it.id }
+    val conEncaje = raiz.aplanar().map { it.first }.filter { it.encajes.isNotEmpty() }.map { it.id }
     if (conEncaje.isEmpty()) return this
 
     var doc = this
     for (id in conEncaje) {
         val pieza = doc.buscar(id) ?: continue
-        val encaje = pieza.encaje ?: continue
-        if (doc.motivoParaNoEncajar(encaje, perfil) != null) continue
-        val nominal = doc.medidaDe(encaje.medida)?.valor ?: continue
-        val destino = encaje.cotaDestino(nominal, perfil)
-
-        val cotas = doc.cotasEnMundoDe(id) ?: continue
-        val actual = when (encaje.eje) {
-            EjeNombrado.X -> cotas.size.x
-            EjeNombrado.Y -> cotas.size.y
-            EjeNombrado.Z -> cotas.size.z
+        // Los por parámetro van primero: mueven un número de la pieza y no su escala,
+        // así que no pisarían a nadie. Los de escala van después y solo si la pieza
+        // no lleva ninguno por parámetro, porque una escala uniforme movería el eje
+        // que el encaje por parámetro acaba de fijar.
+        for (encaje in pieza.encajes.filter { it.porParametro }) {
+            doc = doc.resolverUnoPorParametro(id, encaje, perfil)
         }
-        // Una pieza sin espesor en ese eje daría un factor infinito y un sólido de
-        // tamaño arbitrario que nadie ha pedido.
-        if (actual <= 1e-4f || !actual.isFinite()) continue
-
-        val escala = (pieza.transform.scale * (destino / actual)).coerceIn(1e-3f, 1e4f)
-        if (escala == pieza.transform.scale) continue
-        doc = doc.copy(
-            raiz = doc.raiz.mapear(id) { it.copy(transform = it.transform.copy(scale = escala)) },
-        )
+        if (pieza.encajes.none { it.porParametro }) {
+            for (encaje in pieza.encajes) {
+                doc = doc.resolverUnoPorEscala(id, encaje, perfil)
+            }
+        }
     }
     return doc
+}
+
+/**
+ * La derivación de siempre: escalar la pieza entera hasta que el eje gobernado mida lo
+ * que dice el encaje. Un encaje por parámetro en la misma pieza la invalidaría, y por
+ * eso [resolverEncajes] no llega a llamarla en ese caso.
+ */
+private fun Documento.resolverUnoPorEscala(id: String, encaje: Encaje, perfil: PerfilFabricacion): Documento {
+    val pieza = buscar(id) ?: return this
+    if (motivoParaNoEncajar(encaje, perfil) != null) return this
+    val nominal = medidaDe(encaje.medida)?.valor ?: return this
+    val destino = encaje.cotaDestino(nominal, perfil)
+
+    val cotas = cotasEnMundoDe(id) ?: return this
+    val actual = extension(cotas, encaje.eje)
+    // Una pieza sin espesor en ese eje daría un factor infinito y un sólido de
+    // tamaño arbitrario que nadie ha pedido.
+    if (actual <= 1e-4f || !actual.isFinite()) return this
+
+    val escala = (pieza.transform.scale * (destino / actual)).coerceIn(1e-3f, 1e4f)
+    if (escala == pieza.transform.scale) return this
+    return copy(
+        raiz = raiz.mapear(id) { it.copy(transform = it.transform.copy(scale = escala)) },
+    )
+}
+
+/**
+ * La derivación por parámetro: mover **el número responsable** del eje gobernado.
+ *
+ * La cota de estas piezas es proporcional al parámetro —el radio de un cilindro, la
+ * anchura de una caja—, así que un paso de proporción directa la clava: se mide la
+ * extensión actual en el mundo, se sabe qué parámetro la produce y el nuevo valor sale
+ * de multiplicar por lo que falta. Se acota a los límites del parámetro, y lo que
+ * fuera de ellos se queda donde pueda, que el sitio donde se avisa es la verificación,
+ * no la derivación silenciosa de cada edición.
+ */
+private fun Documento.resolverUnoPorParametro(id: String, encaje: Encaje, perfil: PerfilFabricacion): Documento {
+    val pieza = buscar(id) ?: return this
+    if (motivoParaNoEncajar(encaje, perfil) != null) return this
+    val nominal = medidaDe(encaje.medida)?.valor ?: return this
+    val destino = encaje.cotaDestino(nominal, perfil)
+
+    val clave = pieza.parametroQueGobierna(encaje.eje) ?: return this
+    val definicion = pieza.tipo.parametrosCon(pieza.forma).firstOrNull { it.clave == clave }
+        ?: return this
+    val valorActual = pieza.parametro(clave)
+    // Un parámetro en cero no da una proporción: da un infinito.
+    if (valorActual <= 1e-4f || !valorActual.isFinite()) return this
+
+    val cotas = cotasEnMundoDe(id) ?: return this
+    val actual = extension(cotas, encaje.eje)
+    if (actual <= 1e-4f || !actual.isFinite()) return this
+
+    val nuevo = (valorActual * (destino / actual)).coerceIn(definicion.minimo, definicion.maximo)
+    if (nuevo == valorActual) return this
+    return copy(
+        raiz = raiz.mapear(id) { it.copy(parametros = it.parametros + (clave to nuevo)) },
+    )
 }
 
 /** La extensión de una caja en el eje que se le diga. */

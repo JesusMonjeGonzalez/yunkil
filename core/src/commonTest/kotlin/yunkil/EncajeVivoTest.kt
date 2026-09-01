@@ -243,7 +243,7 @@ class EncajeVivoTest {
 
         val abierto = FormatoYunkil.decodificar(FormatoYunkil.codificar(editor.documentoActual))
 
-        val encaje = assertNotNull(abierto.buscar(id)?.encaje, "el encaje no sobrevivió")
+        val encaje = assertNotNull(abierto.buscar(id)?.encajes?.firstOrNull(), "el encaje no sobrevivió")
         val medida = assertNotNull(abierto.medidaDe(encaje.medida), "la medida no sobrevivió")
         assertEquals(20f, medida.valor)
         assertEquals(ProcedenciaDeMedida.CALIBRE, medida.procedencia)

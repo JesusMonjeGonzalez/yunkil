@@ -40,11 +40,31 @@ Kotlin para iOS, pero no hay todavía una aplicación iPad terminada.
 - Patrón circular en X/Y/Z, hasta 64 copias y ángulo total editable.
 - Taladros, paredes, nervios, encajes, patrones normalizados y perfiles de fabricación.
 - Perfiles de fabricación propios: calibrados con el cupón o editados umbral a umbral, y
-  guardados aparte del documento porque son de la máquina y no de la pieza.
+  guardados aparte del documento porque son de la máquina y no de la pieza. **Con
+  versiones**: reemplazar un perfil propio archiva el anterior y `CatalogoDePerfiles.restaurar`
+  vuelve a cualquiera de sus versiones —restaurar también archiva, porque restaurar es
+  editar—. El historial persiste junto al catálogo.
 - Selección por raymarching CPU, manipulación directa de caras, sección y orientación.
 - Gizmo de mover, girar y escalar sobre el centro de la pieza, con resalte al pasar el
   ratón y ajuste de 1 mm y 15° manteniendo ⇧.
 - Historial transaccional con deshacer y rehacer.
+
+### Piezas y variantes
+
+- **Cable paramétrico**: un tubo de radio variable sobre una polilínea 3D —el mismo
+  nodo que las curvas orgánicas— como pieza del documento. Se declara con `Editor.anadirCable`
+  y se reescribe con `fijarCable`; se compila, se acota, se taladra y se exporta con
+  certificado como cualquier otra pieza. Sus puntos y radios persisten en el `.yunkil`,
+  con su validación al abrir.
+- **Variantes paramétricas**: `Editor.generarVariantes` clona una pieza una vez por
+  valor del parámetro —el tapón para 19, 20 y 21 mm—, las nombra con su valor, las
+  coloca en fila sin que se toquen y lo deja todo en un solo punto de deshacer. El
+  encaje no viaja a las copias a propósito: las variantes existen para distinguir
+  justamente lo que un encaje compartido aplanaría.
+- **Plantillas**: guardar una pieza —o un subárbol— en una biblioteca local
+  (`BibliotecaDePlantillas`) e insertarla después con identificadores frescos, en una
+  transacción deshacible. Con los encajes viajan sus medidas del mundo; una malla
+  importada no se deja guardar porque su campo no viaja.
 
 ### Encajes con el mundo real
 
@@ -104,6 +124,38 @@ paramétrico no existe todavía y un número de 3 mm impreso en FDM se lee peor 
 una sola cosa; y marca el perfil como `CALIBRADO`, que hasta ahora era un estado que nada
 podía producir.
 
+### Holgura proporcional al diámetro
+
+La holgura del cupón es un número fijo por máquina, y como tal es la buena para cotas de
+un par de centímetros. En un agujero de 120 mm se queda corta: el error de la máquina
+crece con el tamaño, y las guías de ajuste FDM expresan la holgura grande como fracción
+del diámetro. Un encaje puede activar `holguraProporcional` —`Editor.fijarHolguraProporcional`—
+y su cota pasa a derivarse del **mayor** entre el piso de la máquina y la fracción del
+diámetro que pide su clase (`Estandares.fraccionDeAjuste`: 0 % presión, 0,25 % ajustado,
+0,5 % deslizante, 1 % libre, por lado). Nunca aprieta: lo que corrige es el caso en que
+el número fijo no llega. La verificación de encajes y el informe usan la misma holgura
+efectiva, para que «cumple» no salga falso por defecto en los diámetros grandes.
+
+### Dos cotas independientes: encajes por parámetro
+
+Una pieza ya lleva **una lista de encajes**, no uno. La derivación de siempre escala
+uniformemente —coherente con el resto del sistema, pero atar el diámetro de un cilindro
+le movía la altura—. Con `Encaje.porParametro`, la cota se deriva moviendo **el parámetro
+responsable del eje** (`Pieza.parametroQueGobierna`: el `radio`, la `anchura`, la
+`altura`…), y ningún otro número de la pieza se mueve. El tapón que debe encajar por
+diámetro y por altura lleva dos encajes por parámetro, cada uno con su medida. Donde no
+hay un parámetro responsable claro —un cono, un toro, una escultura— no se deja
+declarar, y en una pieza no se mezclan modos: o todos por parámetro o todos por escala,
+porque una escala uniforme pisaría al que gobierna por parámetro. El esquema del
+documento sube a la **versión 2** con migración explícita del `encaje` singular.
+
+### La procedencia de una medida se corrige después de medir
+
+Las medidas que da de alta la IA nacen `a ojo`, y así deben nacer: el modelo se las han
+dicho, no las ha medido. `Editor.fijarProcedencia` deja subirlas a `con calibre` en cuanto
+quien midió lo dice, y `medidasSinUso` señala las que ya no justifican ningún encaje. El
+informe exportable avisa de todo encaje verificado contra una medida a ojo.
+
 El cupón se exporta apto a la resolución que sugiere la aplicación y a 0,6 / 0,5 / 0,4 /
 0,3 mm, y hay una prueba que lo fija. Estuvo bloqueado hasta que se arregló la diagonal del
 contorneado: su escalón —el vástago sobre el pie— hacía que la malla se cruzara consigo
@@ -138,6 +190,17 @@ verdad y comprobar que la holgura que sale encaja.
 - Un trazo completo es una sola operación de deshacer.
 - Una escultura seleccionada puede enviarse otra vez a la IA para modificar su contrato
   completo conservando identificadores semánticos.
+- **Edición semántica de partes**: `moverParteOrganica`, `engordarParteOrganica` y
+  `quitarParteOrganica` editan una parte por su identificador —«la cola», «la oreja»—
+  sin reescribir el contrato ni volver a pedirle nada a la IA. El cambio pasa por el
+  mismo validador del contrato: si la parte deja de tocar a su padre, se rechaza con su
+  motivo. Al quitar una parte, las que colgaban de ella se reatajan a su soporte; el
+  cuerpo no se quita.
+- **Selección orgánica por punto**: `parteOrganicaBajo` dice qué parte hay bajo un punto
+  del mundo —la respuesta de un clic que contesta «la cola» en vez de «la escultura»—.
+- La propuesta orgánica se ve como fantasma en el viewport antes de aceptarla, se corrige
+  en rondas cuando el contrato no valida, se rechaza si el documento cambió desde que la
+  IA lo vio y su desenlace va a la bitácora como cualquier propuesta paramétrica.
 - Render, análisis y exportación usan el mismo campo que el modelado técnico.
 
 #### Curvas como una sola parte
@@ -214,13 +277,19 @@ modelo neuronal propio.
 - El modo `Pieza técnica` genera operaciones paramétricas; `Figura orgánica` genera una
   escultura semántica nativa.
 
-Los dos modos **no** tienen las mismas garantías, y conviene no confundirlos. Solo el
-paramétrico interpreta el plan, lo aplica en aislamiento, lo revisa geométricamente y lo
-corrige en rondas; solo él tiene fantasma en el viewport, explicación, aceptación parcial,
-bitácora en `propuestas.jsonl` y una propuesta ligada a la revisión monotónica exacta del
-documento que vio la IA. El orgánico pide el contrato, lo valida y lo ofrece para aceptar
-o descartar entero: no dibuja fantasma, no corrige en rondas, no se registra y no comprueba
-que el documento siga siendo el mismo al aceptar. Igualarlos es la prioridad 3.
+Los dos modos **no** tienen las mismas garantías, y conviene no confundirlos. Lo que ya
+comparten: el contrato orgánico se interpreta y se corrige en rondas si no valida, la
+propuesta se ve como fantasma en el viewport antes de aceptarla, la aceptación está ligada
+a la revisión del documento que vio la IA —cambiar algo a mano entre la propuesta y el
+aceptar la rechaza con su motivo, no pisa trabajo nuevo— y el desenlace va a la bitácora
+igual que el paramétrico, con deshacer inmediato contado como `DESHECHO`.
+
+Lo que sigue siendo solo del paramétrico: la revisión geométrica medida —el revisor
+aplica el plan en aislamiento y le reprocha al modelo lo que sale mal medido, con rondas
+de corrección geométrica—, el crítico visual, la explicación operación a operación con
+aceptación parcial y el registro en `propuestas.jsonl` de las operaciones desmarcadas. El
+orgánico valida el contrato y lo ofrece entero: se acepta o se descarta, sin casillas.
+Igualar lo que falta es la prioridad 1.
 
 Una foto no tiene escala. Para piezas funcionales debe proporcionarse al menos una medida
 real. Si falta, Yunkil debe preguntar antes de modelar. Para figuras orgánicas puede usarse
@@ -238,8 +307,37 @@ una altura objetivo y conservar proporciones visuales.
 - Contorneado dual con aristas más fieles que marching cubes.
 - Certificado de cierre, orientación, degenerados, auto-intersecciones, desviación y volumen.
 - Exportación STL binaria y 3MF con unidades y orientación declaradas.
+- **Placa 3MF multiobjeto**: `Editor.exportarPlacaTresMf` junta varios cuerpos —una pieza
+  y su cupón, las variantes de un encaje, un ensamblaje— en un 3MF con un objeto con
+  nombre por pieza, colocados en fila sobre el plato. Cada cuerpo pasa **su propio**
+  certificado; si uno no es apto no se escribe nada y se nombra la pieza.
+- **Ensamblajes e interferencias**: `Editor.declararEnsamblaje` marca qué cuerpos deben
+  ir separados y montarse después —la única situación en la que un solape es un problema
+  y no técnica de modelado—, y `VerificadorDeEnsamblajes` mide el mm³ de material común
+  por par, o la holgura mínima cuando no se tocan, con la muestra descortada a favor de
+  decir menos. Lo que no se puede medir se dice y no se aprueba.
+  `distanciaEntre` mide el mismo número entre dos piezas cualesquiera, sin declarar nada;
+  `separarEnsamblaje` coloca los cuerpos del ensamblaje sobre el plato con holgura de
+  montaje, y `empaquetarEnPlaca` es la operación general: filas sobre la base, dentro del
+  volumen de impresión, en una sola transacción que o cabe entera o no se toca nada.
+- **Advertencias rápidas de edición**: `advertenciasRapidas` responde en milisegundos
+  con lo que se sabe sin muestrear el campo —parámetros por debajo del detalle mínimo de
+  la boquilla, piezas que no caben en el plato—. No sustituye al análisis; lo precede.
+- **Comparador de perfiles**: `compararPerfiles` corre el análisis de la misma pieza bajo
+  varios perfiles y lo resume en apto, puntuación y avisos con más peso. Cuesta un
+  análisis por fila, y se dice.
+- **Hitos de deshacer**: `marcarHito` guarda el documento con nombre —«antes de los
+  agujeros»— y `deshacerHasta` vuelve a él por el historial en los dos sentidos; si el
+  camino se perdió editando por debajo, se dice y no se finge.
+- **Estimación de impresión**: peso, metros de filamento de 1,75 mm y coste por pieza,
+  desde el volumen del certificado y la densidad y el precio por kg del perfil —de tabla
+  cuando el perfil no los lleva, y dicho—. Sin relleno ni soportes, y se dice.
+- **Informe de fabricación exportable**: `Editor.exportarInformeMarkdown` escribe el
+  informe —métricas, hallazgos, encajes medidos cumpla o no, estimación, ensamblajes y
+  avisos de procedencia— en Markdown, para el taller y el correo, con los mismos números
+  que deciden el certificado.
 - Importación STL ASCII/binaria, soldadura de vértices y horneado a campo de distancia.
-- Una malla no se escribe si no supera el certificado.
+- Una malla no se escribe si no supera el certificado. En la placa, tampoco.
 
 ## Arquitectura
 
@@ -394,7 +492,7 @@ de OpenCode, no se muestra en la interfaz ni se escribe en logs.
 
 ### Bitácora
 
-Las propuestas paramétricas se registran localmente en:
+Las propuestas —paramétricas y orgánicas— se registran localmente en:
 
 ```text
 ~/Library/Application Support/Yunkil/propuestas.jsonl
@@ -417,26 +515,35 @@ ni documentos.
 
 - El editor visual de perfiles solo manipula segmentos rectos; arcos y Bézier existen en el
   núcleo pero no tienen edición visual completa.
-- Los perfiles se calibran, se editan umbral a umbral y se guardan, pero no tienen versión
-  propia: no se puede volver a una edición anterior. Y ninguna holgura calibrada se ha
-  contrastado todavía con impresiones sostenidas,
+- Los perfiles propios ya tienen versiones —cada reemplazo archiva el anterior y se puede
+  restaurar—, pero ninguna holgura calibrada se ha contrastado todavía con impresiones
+  sostenidas,
   así que Yunkil garantiza que la geometría tiene la holgura declarada; que esa holgura sea
   la buena para tu máquina depende de lo bien que hayas leído tu cupón.
-- Un encaje gobierna la extensión de la pieza en **un** eje y la ajusta escalando
-  uniformemente, así que atar el diámetro de un cilindro también mueve su altura. Es
-  coherente con la escala uniforme del resto del sistema, pero significa que una pieza que
-  deba encajar por dos cotas independientes todavía no se puede declarar.
+- Un encaje gobierna la extensión de la pieza en **un** eje. Por omisión la ajusta
+  escalando uniformemente —atar el diámetro de un cilindro mueve su altura—; con
+  `porParametro` mueve el parámetro responsable del eje y deja los demás quietos. En una
+  pieza no se mezclan los dos modos, y donde no hay parámetro responsable no se declara.
 - La comprobación de un encaje `RECIBE` mide la mayor **bola** que cabe. En un rebaje más
   ancho que hondo lo que limita es el fondo y no la pared, así que dice menos holgura de la
   que hay. Se queda corta hacia el lado seguro, que es el que corresponde a una
   comprobación que falla cerrado.
+- Las medidas del mundo admiten una **tolerancia ±** (`Editor.fijarTolerancia`): la
+  incertidumbre se come la holgura, y una verificación contra una medida incierta en
+  más milímetros de los que sobran se declara no medible en vez de cumplida.
 - Las medidas del mundo se dan de alta con procedencia `a ojo` cuando las escribe la IA:
   al modelo se lo han dicho, no lo ha medido. Subirlas a `con calibre` es cosa de quien
-  midió, y hoy solo se puede hacer desde el núcleo, no desde la interfaz.
-- El 3MF se escribe sin compresión.
+  midió, y el núcleo ya lo permite (`Editor.fijarProcedencia`), pero la interfaz todavía
+  no trae el mando.
+- El 3MF se escribe sin compresión —el de placa multiobjeto incluido—.
+- Las capacidades nuevas de esta entrega —variantes, plantillas, placa multiobjeto,
+  informe Markdown, ensamblajes, cables y holgura proporcional— entran por el núcleo y
+  están probadas; la interfaz todavía no trae paneles para todas. No se afirma en la
+  interfaz lo que la interfaz no expone.
 - No existe aplicación iPad ni render por tiles.
-- Las curvas se escriben en el contrato y se reeditan reescribiéndolo o pidiéndoselo otra
-  vez a la IA; sus puntos de control no se pueden agarrar todavía en el viewport.
+- Las partes orgánicas ya se mueven, engordan y quitan por su identificador desde el
+  núcleo, pero en el viewport todavía no se agarran: ni sus puntos de control ni la
+  selección por clic está cableada en la interfaz.
 - Las curvas existen solo en el motor orgánico. El DSL paramétrico crea con
   `parametros: Map<String, Float>`, que no admite una lista de puntos, así que un cable o
   un latiguillo técnico todavía no puede pedirse como pieza paramétrica.
@@ -470,34 +577,30 @@ sino cerrar confianza, reproducibilidad e interacción. Añadir formas nuevas qu
    holgura que declaraste» y «esta pieza entra en tu máquina». La cadena de código está
    entera —cupón, holgura medida, perfil guardado y activo—; falta imprimir cupones en
    máquinas distintas, medirlos y comprobar que la holgura que sale encaja de verdad.
-1. Igualar el flujo orgánico de IA al paramétrico: fantasma, revisión por rondas, revisión
-   de documento ligada a la propuesta y bitácora.
-2. Selección y modificación directa de partes orgánicas, incluidos los puntos de control
-   de una curva agarrados en el viewport.
-3. Ensamblajes ligeros e interferencias. **Necesita una decisión de diseño antes que
-   código:** comprobar que dos piezas no se meten una en otra no significa nada en este
-   documento, porque no hay concepto de cuerpo suelto. La raíz es una unión de todo, y dos
-   piezas que se solapan bajo una unión están bien —así es como se construye una pieza—, así
-   que una interferencia solo existe entre cuerpos que deben ensamblar, y eso hoy no se
-   puede decir.
-4. Versionar los perfiles: hoy se calibran, se editan y se guardan, pero una edición pisa
-   la anterior y no hay a dónde volver.
-5. Un encaje que gobierne dos cotas independientes. Hoy gobierna la extensión en un eje y
-   la ajusta escalando uniformemente, así que atar el diámetro de un cilindro le mueve la
-   altura; es coherente con la escala uniforme del sistema y aun así deja fuera media
-   mecánica.
-6. Editor visual de perfiles con líneas, arcos, Bézier, cotas y restricciones.
-7. Curvas en el DSL paramétrico, para cables, latiguillos y guías técnicas.
-8. Reconstrucción multivista propia y backend Core ML/Metal para imagen a geometría.
-9. SVG y texto paramétrico como perfiles multicontorno.
-10. Pintado de las zonas protegidas en el viewport.
-11. División automática de figuras, pasadores, huecos de resina y multicolor.
-12. Puente Bambu: 3MF multiobjeto con plato y ajustes por pieza, y abrir directamente en
-    Bambu Studio. Hoy el 3MF lleva un solo objeto, así que una pieza y su cupón de
-    calibración no pueden salir en la misma placa. Va detrás de lo anterior a propósito:
-    es fontanería y no responde a por qué abrir Yunkil, que es lo que responden los
-    encajes.
-13. Después: 3MF comprimido e iPad con render por tiles.
+1. Igualar el resto del flujo orgánico de IA al paramétrico: revisión geométrica medida,
+   crítico visual y aceptación parcial de un contrato. El fantasma, las rondas de
+   validez, la revisión de documento ligada a la propuesta y la bitácora ya están.
+2. Selección y modificación directa de partes orgánicas en el viewport: el núcleo ya
+   resuelve «qué parte hay bajo este punto» y las edita por su identificador; falta el
+   gesto, incluidos los puntos de control de una curva agarrados con el ratón.
+3. Paneles de la interfaz para lo que el núcleo ya hace: variantes, plantillas, placa
+   multiobjeto, informe exportable, ensamblajes con su verificación y separación,
+   cables, la procedencia y la tolerancia de las medidas, el comparador de perfiles, la
+   edición semántica de partes orgánicas y los hitos de deshacer. El núcleo está
+   probado; la interfaz no lo expone.
+4. Editor visual de perfiles con líneas, arcos, Bézier, cotas y restricciones.
+5. Curvas en el DSL de la IA paramétrica. El cable ya existe como pieza del documento y
+   el motor orgánico lleva años suyo las curvas; falta que el catálogo del modelo pueda
+   pedirlas con puntos, que hoy `parametros: Map<String, Float>` no admite.
+6. Reconstrucción multivista propia y backend Core ML/Metal para imagen a geometría.
+7. SVG y texto paramétrico como perfiles multicontorno.
+8. Pintado de las zonas protegidas en el viewport.
+9. División automática de figuras, pasadores, huecos de resina y multicolor.
+10. Puente Bambu, segunda mitad: la placa 3MF multiobjeto ya existe —pieza y cupón en la
+    misma placa, ajustes por objeto en el laminador—; falta abrirla directamente en
+    Bambu Studio. Va detrás de lo anterior a propósito: es fontanería y no responde a
+    por qué abrir Yunkil, que es lo que responden los encajes.
+11. Después: 3MF comprimido e iPad con render por tiles.
 
 No se persigue replicar render, animación, rigging o composición de Blender. La ventaja de
 Yunkil debe ser generar, editar semánticamente y certificar piezas técnicas y figuras

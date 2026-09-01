@@ -76,6 +76,17 @@ data class PerfilFabricacion(
      * esto, olvidar la calibración de una A1 devolvía a la P1S, que es otra impresora.
      */
     val derivadoDe: String? = null,
+
+    /**
+     * Densidad del material en g/cm³, para convertir volumen en peso.
+     *
+     * Cero significa «no la sé»: la estimación la deduce de la tabla por nombre de
+     * material y dice que es un valor de tabla, no del usuario.
+     */
+    val densidadMaterial: Float = 0f,
+
+    /** Precio del material por kilogramo, en la moneda de quien compra el filamento. */
+    val costePorKg: Float = 0f,
 ) {
     init {
         require(boquilla > 0f && boquilla.isFinite()) { "La boquilla debe ser positiva" }
@@ -212,6 +223,17 @@ object CatalogoDePerfiles {
 
     private var guardados: List<PerfilFabricacion> = emptyList()
 
+    /**
+     * Las versiones anteriores de cada perfil propio, la más reciente primero.
+     *
+     * Calibrar **pisa**: reemplazar un perfil propio es lo normal al recalibrar, y
+     * antes la holgura de hace un mes se perdía para siempre. Como la calibración es
+     * el único dato que dice «esta pieza entra en esta máquina», perderlo equivale a
+     * volver a empezar. Un perfil de fábrica no tiene historial porque nadie puede
+     * cambiarlo, solo copiarlo.
+     */
+    private var historial: Map<String, List<PerfilFabricacion>> = emptyMap()
+
     private val formato = Json { prettyPrint = true; ignoreUnknownKeys = true }
 
     /** Todos, con los de fábrica primero. */
@@ -221,6 +243,10 @@ object CatalogoDePerfiles {
     val propios: List<PerfilFabricacion> get() = guardados
 
     fun porNombre(nombre: String): PerfilFabricacion? = todos.firstOrNull { it.nombre == nombre }
+
+    /** Las versiones anteriores de un perfil propio, la más reciente primero. */
+    fun historialDe(nombre: String): List<PerfilFabricacion> =
+        historial[nombre] ?: emptyList()
 
     /**
      * Lee el archivo de perfiles propios y devuelve cuántos había.
@@ -241,22 +267,76 @@ object CatalogoDePerfiles {
     }
 
     /**
-     * Guarda un perfil propio y reescribe el archivo. Devuelve el motivo si no se puede.
+     * Guarda [perfil] y **archiva el que pisaba**, si lo había.
      *
-     * Un nombre que ya usa un perfil de fábrica se rechaza: dos perfiles con el mismo
-     * nombre y distintos números convertirían «lo tengo calibrado» en una lotería.
-     * Reemplazar uno propio sí se permite, que es lo que pasa al recalibrar.
+     * La versión anterior no se borra: pasa al historial, de donde se puede volver
+     * con [restaurar]. Es la diferencia entre editar y machacar.
      */
-    fun guardar(perfil: PerfilFabricacion, ruta: String): String? {
+    fun guardar(perfil: PerfilFabricacion, ruta: String, rutaHistorial: String? = null): String? {
         if (PerfilFabricacion.VERIFICADOS.any { it.nombre == perfil.nombre }) {
             return "«${perfil.nombre}» es un perfil de fábrica; dale otro nombre al tuyo"
         }
+        val anterior = guardados.firstOrNull { it.nombre == perfil.nombre }
         val nuevos = guardados.filter { it.nombre != perfil.nombre } + perfil
         if (!escribirArchivo(ruta, formato.encodeToString(ListSerializer(PerfilFabricacion.serializer()), nuevos).encodeToByteArray())) {
             return "No se pudo escribir $ruta"
         }
         guardados = nuevos
+        if (anterior != null) {
+            val versiones = historial[perfil.nombre] ?: emptyList()
+            historial = historial + (perfil.nombre to listOf(anterior) + versiones)
+            rutaHistorial?.let { escribirHistorial(it) }
+        }
         return null
+    }
+
+    /**
+     * Devuelve el perfil propio a una versión anterior de su historial.
+     *
+     * El que estaba puesto no se pierde: se archiva como la versión más reciente,
+     * porque restaurar también es editar y deshacer un restaurar no existe. [indice]
+     * indexa [historialDe]: 0 es la versión archivada más reciente.
+     */
+    fun restaurar(nombre: String, indice: Int, ruta: String, rutaHistorial: String? = null): String? {
+        val versiones = historial[nombre] ?: return "«$nombre» no tiene versiones guardadas"
+        if (indice !in versiones.indices) {
+            return "«$nombre» no tiene la versión $indice"
+        }
+        val elegida = versiones[indice]
+        val actual = guardados.firstOrNull { it.nombre == nombre }
+            ?: return "No hay ningún perfil tuyo llamado «$nombre»"
+        val nuevos = guardados.filter { it.nombre != nombre } + elegida
+        if (!escribirArchivo(ruta, formato.encodeToString(ListSerializer(PerfilFabricacion.serializer()), nuevos).encodeToByteArray())) {
+            return "No se pudo escribir $ruta"
+        }
+        guardados = nuevos
+        historial = historial + (nombre to (listOf(actual) + versiones - elegida).distinct())
+        rutaHistorial?.let { escribirHistorial(it) }
+        return null
+    }
+
+    /** Lee el archivo del historial. Un archivo que no existe es la primera vez, no un error. */
+    fun cargarHistorialDesde(ruta: String): Int {
+        val texto = leerArchivo(ruta)?.decodeToString() ?: return 0
+        historial = try {
+            formato.decodeFromString(
+                kotlinx.serialization.serializer<Map<String, List<PerfilFabricacion>>>(),
+                texto,
+            )
+        } catch (e: Exception) {
+            return -1
+        }
+        return historial.values.sumOf { it.size }
+    }
+
+    private fun escribirHistorial(ruta: String) {
+        escribirArchivo(
+            ruta,
+            formato.encodeToString(
+                kotlinx.serialization.serializer<Map<String, List<PerfilFabricacion>>>(),
+                historial,
+            ).encodeToByteArray(),
+        )
     }
 
     /** Quita un perfil propio. Los de fábrica no se pueden borrar. */
@@ -273,5 +353,6 @@ object CatalogoDePerfiles {
     /** Vuelve a dejar solo los de fábrica, sin tocar el disco. Para arrancar limpio y para las pruebas. */
     fun vaciar() {
         guardados = emptyList()
+        historial = emptyMap()
     }
 }

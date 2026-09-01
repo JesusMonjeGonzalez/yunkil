@@ -67,7 +67,7 @@ class VerificacionDeEncajeTest {
     @Test
     fun `un tapon limpio mide la holgura que declaro`() {
         val tapon = pieza(TipoPieza.CILINDRO, "Tapón", "radio" to 15f, "altura" to 20f)
-            .copy(encaje = encaje(SentidoDeEncaje.ENTRA))
+            .copy(encajes = listOf(encaje(SentidoDeEncaje.ENTRA)))
 
         val informe = informeDe(documentoCon(20f, tapon))
 
@@ -96,7 +96,7 @@ class VerificacionDeEncajeTest {
             "anchura" to 40f, "altura" to 40f, "profundidad" to 40f, "redondeo" to 0f,
         )
         val taladro = pieza(TipoPieza.CILINDRO, "Taladro", "radio" to 5f, "altura" to 60f)
-            .copy(encaje = encaje(SentidoDeEncaje.RECIBE))
+            .copy(encajes = listOf(encaje(SentidoDeEncaje.RECIBE)))
         val cuerpo = Pieza.nueva(TipoPieza.DIFERENCIA, "Cuerpo").copy(hijos = listOf(bloque, taladro))
 
         val informe = informeDe(documentoCon(8f, cuerpo))
@@ -117,7 +117,7 @@ class VerificacionDeEncajeTest {
         // una pestaña que sobresale, y la pieza dejó de entrar por donde tenía que entrar.
         // Este es el fallo que ningún STL sabe contar: el plan era correcto y el resultado no.
         val tapon = pieza(TipoPieza.CILINDRO, "Tapón", "radio" to 15f, "altura" to 20f)
-            .copy(encaje = encaje(SentidoDeEncaje.ENTRA))
+            .copy(encajes = listOf(encaje(SentidoDeEncaje.ENTRA)))
         val pestana = pieza(
             TipoPieza.CAJA, "Pestaña",
             "anchura" to 21.6f, "altura" to 4f, "profundidad" to 4f, "redondeo" to 0f,
@@ -146,7 +146,7 @@ class VerificacionDeEncajeTest {
             "anchura" to 40f, "altura" to 40f, "profundidad" to 40f, "redondeo" to 0f,
         )
         val taladro = pieza(TipoPieza.CILINDRO, "Taladro", "radio" to 5f, "altura" to 60f)
-            .copy(encaje = encaje(SentidoDeEncaje.RECIBE))
+            .copy(encajes = listOf(encaje(SentidoDeEncaje.RECIBE)))
         val cuerpo = Pieza.nueva(TipoPieza.DIFERENCIA, "Cuerpo").copy(hijos = listOf(bloque, taladro))
         val pasador = pieza(TipoPieza.CILINDRO, "Pasador", "radio" to 2f, "altura" to 50f)
 
@@ -171,7 +171,7 @@ class VerificacionDeEncajeTest {
         // La pieza está oculta: no aporta material, así que no hay nada que medir. Callar
         // aquí sería indistinguible de haberla medido y aprobado.
         val tapon = pieza(TipoPieza.CILINDRO, "Tapón", "radio" to 15f, "altura" to 20f)
-            .copy(encaje = encaje(SentidoDeEncaje.ENTRA), visible = false)
+            .copy(encajes = listOf(encaje(SentidoDeEncaje.ENTRA)), visible = false)
         val soporte = pieza(
             TipoPieza.CAJA, "Soporte",
             "anchura" to 30f, "altura" to 10f, "profundidad" to 30f, "redondeo" to 0f,
