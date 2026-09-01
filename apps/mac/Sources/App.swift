@@ -14,6 +14,15 @@ struct PropuestaOrganica {
     let nombre: String
     let contrato: String
     let objetivoId: String?
+    /// Id único de la propuesta, para la bitácora.
+    let registroId: String
+    let peticion: String
+    /// La respuesta cruda del modelo: lo que la bitácora guarda como `plan`.
+    let planCrudo: String
+    /// En qué vuelta de corrección salió el contrato aceptado. Una es a la primera.
+    let rondas: Int
+    /// La revisión que vio la IA cuando escribió el contrato.
+    let versionDocumento: Int64
 }
 
 // MARK: - Vista Metal con gestos
@@ -1726,31 +1735,73 @@ final class EstadoDeLaApp: ObservableObject {
         let medida = medidaDeReferencia.trimmingCharacters(in: .whitespacesAndNewlines)
         let objetivoId = esEsculturaSeleccionada ? seleccion : nil
         let esculturaActual = objetivoId.flatMap { editor.contratoDeEscultura(id: $0) }
+        // La propuesta se liga a la revisión que la vio. Aceptar después de un cambio
+        // manual debe fallar con su motivo, no pisar trabajo nuevo con geometría vieja.
+        let versionBase = editor.versionDocumento
+        let escala = medida.isEmpty ? "" : "\nMedida real conocida: \(medida)"
+        let contextoActual = esculturaActual.map {
+            "\nEscultura actual editable. Devuelve el contrato COMPLETO modificado, conservando ids que no cambien:\n\($0)"
+        } ?? ""
+        let peticionCompleta = peticion + escala + contextoActual
 
         tareaIA = Task {
             do {
                 let seleccion = try await aiSettings.selectionForRequest(withImage: imagen != nil)
-                let escala = medida.isEmpty ? "" : "\nMedida real conocida: \(medida)"
-                let contexto = esculturaActual.map {
-                    "\nEscultura actual editable. Devuelve el contrato COMPLETO modificado, conservando ids que no cambien:\n\($0)"
-                } ?? ""
-                let respuesta = try await AsistenteLocal.pedirPlan(
-                    system: MotorOrganico.shared.instrucciones(),
-                    user: peticion + escala + contexto,
-                    selection: seleccion,
-                    maxTokens: imagen == nil ? 8_000 : 12_000,
-                    imagen: imagen
-                )
-                try Task.checkCancellation()
-                let leido = MotorOrganico.shared.interpretar(respuesta: respuesta)
-                guard leido.aceptado, let contrato = leido.contratoCanonico else {
-                    throw LocalAssistantError.invalidPlan(leido.motivo ?? "contrato orgánico inválido")
+                var mensaje = peticionCompleta
+                var aceptado: ResultadoContratoOrganico?
+                var respuestaAceptada = ""
+                var rondaAceptada = 0
+                var ultimoMotivo = "el modelo no llegó a responder"
+
+                for ronda in 1...Self.rondasDeCorreccion {
+                    try Task.checkCancellation()
+                    if ronda > 1 { resultadoIA = "Corrigiendo el contrato (intento \(ronda))…" }
+                    // La imagen viaja en todas las rondas, igual que en el paramétrico:
+                    // corregir de memoria una figura que ya no se ve sale peor.
+                    let respuesta = try await AsistenteLocal.pedirPlan(
+                        system: MotorOrganico.shared.instrucciones(),
+                        user: mensaje,
+                        selection: seleccion,
+                        maxTokens: imagen == nil ? 8_000 : 12_000,
+                        imagen: imagen
+                    )
+                    try Task.checkCancellation()
+                    guard editor.versionDocumento == versionBase else {
+                        throw LocalAssistantError.documentChanged
+                    }
+                    let leido = MotorOrganico.shared.interpretar(respuesta: respuesta)
+                    guard leido.aceptado, leido.contratoCanonico != nil else {
+                        let motivo = leido.motivo ?? "contrato orgánico inválido"
+                        ultimoMotivo = motivo
+                        mensaje = peticionCompleta + "\n\n" + MotorOrganico.shared
+                            .correccionParaModelo(motivo: motivo, respuestaAnterior: respuesta)
+                        continue
+                    }
+                    aceptado = leido
+                    respuestaAceptada = respuesta
+                    rondaAceptada = ronda
+                    break
                 }
+
+                guard let leido = aceptado, let contrato = leido.contratoCanonico else {
+                    throw LocalAssistantError.invalidPlan(ultimoMotivo)
+                }
+
                 propuestaOrganica = PropuestaOrganica(
                     nombre: leido.nombre.isEmpty ? "Figura orgánica" : leido.nombre,
                     contrato: contrato,
-                    objetivoId: objetivoId
+                    objetivoId: objetivoId,
+                    registroId: UUID().uuidString,
+                    peticion: peticion,
+                    planCrudo: respuestaAceptada,
+                    rondas: rondaAceptada,
+                    versionDocumento: versionBase
                 )
+                // El fantasma orgánico usa el mismo canal de vista que el paramétrico:
+                // se ve lo que se aceptaría antes de tocar el documento.
+                let recompilo = editor.previsualizarEscultura(contratoCanonico: contrato)
+                renderizador?.sincronizar(recompilar: recompilo)
+                renderizador?.encuadrar()
                 resultadoIA = "Anatomía lista: revisa y genera la malla."
             } catch is CancellationError {
                 resultadoIA = "Generación orgánica cancelada."
@@ -1763,24 +1814,80 @@ final class EstadoDeLaApp: ObservableObject {
     }
 
     func descartarPropuestaOrganica() {
+        guard let p = propuestaOrganica else {
+            propuestaOrganica = nil
+            resultadoIA = nil
+            return
+        }
         propuestaOrganica = nil
-        resultadoIA = nil
+        let recompilo = editor.previsualizarEscultura(contratoCanonico: nil)
+        renderizador?.sincronizar(recompilar: recompilo)
+        anotarOrganica(p, desenlace: "DESCARTADO")
+        resultadoIA = "Propuesta descartada; el documento no cambió."
     }
 
     func aceptarPropuestaOrganica() {
-        guard let propuesta = propuestaOrganica, !iaTrabajando else { return }
-        let aplicado = propuesta.objetivoId.map {
-            editor.reemplazarEscultura(id: $0, contratoCanonico: propuesta.contrato)
-        } ?? editor.anadirEscultura(contratoCanonico: propuesta.contrato, padreId: nil)
-        if aplicado {
-            propuestaOrganica = nil
+        guard let p = propuestaOrganica, !iaTrabajando else { return }
+        // Antes de aplicar, no después: con el fantasma todavía puesto la escultura
+        // recién aceptada se pintaría de verde sobre sí misma hasta el próximo cambio.
+        let recompilo = editor.previsualizarEscultura(contratoCanonico: nil)
+        renderizador?.sincronizar(recompilar: recompilo)
+        propuestaOrganica = nil
+
+        let aplicado = p.objetivoId.map {
+            editor.reemplazarEsculturaEnVersion(
+                id: $0, contratoCanonico: p.contrato, versionEsperada: p.versionDocumento
+            )
+        } ?? editor.anadirEsculturaEnVersion(
+            contratoCanonico: p.contrato, versionEsperada: p.versionDocumento, padreId: nil
+        )
+        if aplicado || editor.ultimoError == nil {
+            // El booleano de los métodos de edición devuelve si hizo falta recompilar
+            // el shader, no si se aplicó; el fallo real es `ultimoError`, y un cambio
+            // solo numérico puede aplicarse sin recompilación.
+            anotarOrganica(p, desenlace: "APLICADO")
+            // Queda pendiente de arrepentimiento, igual que la paramétrica: si el
+            // siguiente deshacer llega enseguida, el desenlace se corrige a DESHECHO.
+            ultimaPropuestaAplicada = Propuesta(
+                id: p.registroId,
+                peticion: p.peticion,
+                plan: p.planCrudo,
+                rondas: p.rondas,
+                reparos: []
+            )
+            momentoDeAplicar = Date()
             resultadoIA = "Escultura nativa añadida; puedes retocarla con las brochas."
             refrescar(recompilo: true)
             renderizador?.encuadrar()
             if analizarAlCrear { analizarFabricacion() }
+        } else if editor.ultimoError?.contains("documento cambió") == true {
+            // El fantasma ya está quitado y la propuesta fuera de pantalla: queda
+            // contar el motivo y no ensuciar la bitácora con un falso descarte.
+            resultadoIA = editor.ultimoError
         } else {
             aviso = editor.ultimoError ?? "No se pudo añadir la escultura."
+            anotarOrganica(p, desenlace: "DESCARTADO")
         }
+    }
+
+    /// Apunta el desenlace de una propuesta orgánica. Que falle no puede romper nada.
+    ///
+    /// La bitácora es una sola para los dos modos a propósito: «acertó» no puede
+    /// depender de con qué botón se le pidió la pieza. El plan registrado es la
+    /// respuesta cruda del modelo, que en el orgánico es el contrato entero.
+    private func anotarOrganica(_ p: PropuestaOrganica, desenlace: String) {
+        _ = editor.registrarDesenlace(
+            ruta: Self.rutaDeLaBitacora,
+            id: p.registroId,
+            momento: Int64(Date().timeIntervalSince1970),
+            peticion: p.peticion,
+            plan: p.planCrudo,
+            nombrePerfil: perfilDeFabricacion,
+            rondas: Int32(p.rondas),
+            reparos: [],
+            desenlaceNombre: desenlace,
+            rechazadas: []
+        )
     }
 
     var esEsculturaSeleccionada: Bool {
@@ -2718,6 +2825,12 @@ struct VistaPrincipal: View {
                 HStack(spacing: 10) {
                     Label(propuesta.nombre, systemImage: "figure.stand")
                         .font(Tipo.cuerpo.weight(.semibold))
+                    if propuesta.rondas > 1 {
+                        Text("corregido en \(propuesta.rondas) rondas")
+                            .font(Tipo.pie).foregroundStyle(Tinta.cota)
+                    }
+                    Text("Se ve en verde sobre la pieza; lo que aceptes se añadirá tal cual.")
+                        .font(Tipo.pie).foregroundStyle(Tinta.cota).lineLimit(2)
                     Spacer()
                     Button("Descartar") { estado.descartarPropuestaOrganica() }
                     Button("Añadir escultura") { estado.aceptarPropuestaOrganica() }
