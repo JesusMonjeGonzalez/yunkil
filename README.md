@@ -112,9 +112,20 @@ Technical proposals are:
 4. Shown as an add/remove preview.
 5. Applied only after explicit acceptance.
 
-Local mode uses Hearthia on `127.0.0.1:9292`. The optional remote provider can
-receive text, structured document context and user-selected reference images;
-it does not receive a complete `.yunkil` file or exported STL.
+Organic-figure proposals share the same guarantees: an invalid contract is corrected
+in up to three rounds with the reason sent back to the model, the proposed sculpture
+is drawn as a ghost in the viewport before acceptance, acceptance is bound to the
+document revision the model saw, and the outcome is written to the local ledger
+including an immediate undo counted as a rejection.
+
+Every proposal outcome is recorded locally in `~/Library/Application
+Support/Yunkil/propuestas.jsonl` — the difference between a plan that validates and
+a plan a person kept is data, not opinion. The file can be deleted at any time.
+
+Local mode uses Hearthia on `127.0.0.1:9292` — those requests never leave the Mac.
+The optional remote provider can receive text, structured document context and
+user-selected reference images; it does not receive a complete `.yunkil` file or an
+exported STL.
 
 ## Build And Run
 
@@ -186,10 +197,10 @@ verification gates.
 ## Current Focus
 
 1. Validate the calibrated clearance against real prints on real machines.
-2. Bring the organic AI flow level with the parametric one: ghost preview, correction
-   rounds, document review tied to the proposal and a log entry.
-3. Direct selection and editing of organic parts, including grabbing a curve's control
-   points in the viewport.
+2. Finish bringing the organic AI flow level with the parametric one: measured
+   geometric review, a visual critic and partial acceptance of a contract.
+3. Organic parts in the viewport: the core already answers "which part is under this
+   point" and edits parts by id; the gesture and the curve control points are missing.
 
 `docs/technical-overview.md` carries the full ordered list; this is its head.
 
