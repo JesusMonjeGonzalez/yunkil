@@ -43,6 +43,7 @@ import yunkil.ia.Vocabulario
 import yunkil.ia.contextoParaModelo
 import yunkil.ia.EjeNombrado
 import yunkil.ia.cotasEnMundoDe
+import yunkil.ia.mm
 import yunkil.ia.transformDelPadreDe
 import yunkil.imagen.Vistas
 import yunkil.kernel.Aabb
@@ -66,6 +67,7 @@ import yunkil.malla.escribirArchivo
 import yunkil.malla.leerArchivo
 import yunkil.malla.anadirLinea
 import yunkil.malla.Exportador
+import yunkil.organico.LineaOrganica
 import yunkil.organico.MotorOrganico
 import yunkil.organico.ResultadoContratoOrganico
 import yunkil.msl.CampoEnShader
@@ -299,10 +301,20 @@ class Editor(inicial: Documento = Documento.vacio()) {
      * Un contrato que no compila quita el fantasma en lugar de dejar el anterior:
      * enseñar una figura que ya no es la propuesta es mentir en el momento de decidir.
      *
+     * Con [aceptadas] se previsualizan solo las partes marcadas, cerradas igual que al
+     * aplicar. Las casillas del panel cambian lo que se añadiría, así que tienen que
+     * cambiar lo que se ve: un fantasma con la cola puesta mientras el usuario acaba de
+     * desmarcarla miente justo en el momento de decidir. Una selección que no compila
+     * también quita el fantasma, por lo mismo.
+     *
      * Devuelve `true` si hay que recompilar el shader, igual que el resto de ediciones.
      */
-    fun previsualizarEscultura(contratoCanonico: String?): Boolean {
-        val nuevo = contratoCanonico?.let { MotorOrganico.nodoDeContrato(it) }
+    fun previsualizarEscultura(contratoCanonico: String?, aceptadas: List<Int>? = null): Boolean {
+        val contrato = contratoCanonico?.let { canonico ->
+            if (aceptadas == null) canonico
+            else MotorOrganico.conPartes(canonico, aceptadas).contratoCanonico
+        }
+        val nuevo = contrato?.let { MotorOrganico.nodoDeContrato(it) }
         if (nuevo == nodoFantasma) return false
         nodoFantasma = nuevo
         uniformsDelFantasma = nuevo?.empaquetarUniforms()?.toList() ?: emptyList()
@@ -4291,6 +4303,136 @@ class Editor(inicial: Documento = Documento.vacio()) {
     }
 
     /**
+     * Lo mismo que [revisarPlan], para una figura orgánica propuesta por el modelo.
+     *
+     * Hasta aquí el camino orgánico corregía **formato** y nunca **geometría**: el
+     * contrato pasaba el validador —esquema, contactos, Lipschitz, tamaño— y se
+     * enseñaba tal cual. Un validador dice si la figura se puede construir; no dice
+     * si se puede imprimir ni si mide lo que se pidió. Un cuello de 0,4 mm es un
+     * contrato impecable y una figura que sale rota de la máquina.
+     *
+     * El banco es un documento **vacío** y no una copia del del usuario, y esa es la
+     * única diferencia de fondo con `revisarPlan`. Una escultura se añade al lado de
+     * lo que ya hubiera, así que medir el conjunto le colgaría al modelo las paredes
+     * finas de una pieza que no ha escrito, y le devolvería como fallo el hecho
+     * legítimo de que su figura no toque el resto de la placa.
+     *
+     * El orden es el mismo: primero lo que el modelo puede arreglar reescribiendo la
+     * anatomía —el tamaño pedido— y después lo que mide el analizador. No se mezclan
+     * porque una figura al doble de tamaño da avisos de pared que desaparecen solos
+     * al corregir la escala, y gastarían una ronda por un fallo que no existía.
+     */
+    fun revisarContrato(
+        contratoCanonico: String,
+        peticion: String = "",
+        nombrePerfil: String? = null,
+    ): RevisionDePlan {
+        val banco = Editor(Documento.vacio())
+        if (!banco.anadirEscultura(contratoCanonico)) {
+            return RevisionDePlan.noAplicable(banco.ultimoError ?: "el contrato no produce una figura")
+        }
+        val cotas = banco.cotasDelModelo()
+            ?: return RevisionDePlan.noAplicable("la figura no deja ninguna geometría que analizar")
+
+        motivoDeCotas(cotas, peticion)?.let { return RevisionDePlan(listOf(it), null) }
+
+        val informe = banco.analizarFabricacion(nombrePerfil)
+            ?: return RevisionDePlan.noAplicable(
+                banco.ultimoError ?: "la figura no deja ninguna geometría que analizar",
+            )
+        return RevisionDePlan.de(informe)
+    }
+
+    /**
+     * El motivo de que la figura no mida lo que decía la petición, o `null`.
+     *
+     * Se reutiliza [desvio], que es el mismo emparejamiento por tamaño de la
+     * post-condición paramétrica: nadie sabe si el «60 × 40 × 25» iba ancho × fondo ×
+     * alto, y adivinarlo mandaría al modelo a girar la figura por un malentendido.
+     *
+     * La diferencia con el camino paramétrico es que aquí no hay arreglo automático.
+     * `acotar` escala el modelo entero y para una pieza técnica eso es correcto; para
+     * una figura, escalarla uniforme para que llegue a la altura pedida adelgaza al
+     * mismo tiempo las patas que el analizador acaba de medir. El modelo tiene la
+     * anatomía en la mano y puede rehacerla con las cotas buenas: se le dice cuánto
+     * mide y cuánto se pidió, y lo corrige él.
+     */
+    private fun motivoDeCotas(cotas: Aabb, peticion: String): String? {
+        val pedidas = CotasPedidas.leer(peticion) ?: return null
+        val error = desvio(cotas, pedidas)
+        if (error.isEmpty() || error.sum() <= TOLERANCIA_DE_COTA) return null
+        val medidas = "${mm(cotas.size.x)} × ${mm(cotas.size.y)} × ${mm(cotas.size.z)} mm"
+        val pedido = pedidas.eje?.let { eje ->
+            "${mm(pedidas.medidaDelEje ?: 0f)} mm en el eje ${eje.name}"
+        } ?: pedidas.libres.joinToString(" × ") { mm(it) } + " mm"
+        return "La figura mide $medidas y la petición pedía $pedido. " +
+            "Rehaz el contrato con las coordenadas y los radios en la escala pedida; " +
+            "no basta con escalar, las partes finas tienen que seguir siendo imprimibles."
+    }
+
+    /** El reintento cuando el contrato era válido pero la figura que sale no se sostiene. */
+    fun revisionOrganicaParaModelo(motivos: List<String>, respuestaAnterior: String): String =
+        MotorOrganico.revisionParaModelo(motivos, respuestaAnterior)
+
+    // ---------------------------------------------- aceptación parcial orgánica
+
+    /**
+     * La figura contada parte por parte, lista para enseñarla con una casilla cada una.
+     *
+     * Va por aquí y no llamando a `MotorOrganico` desde la aplicación por la misma
+     * razón que [explicarPlan]: toda la superficie que consume Swift entra por
+     * `Editor`, porque un `object` de Kotlin cruza el puente con otro nombre y otra
+     * forma según la versión del compilador.
+     */
+    fun explicarContrato(contratoCanonico: String): List<LineaOrganica> =
+        MotorOrganico.explicar(contratoCanonico)
+
+    /** Cierra hacia abajo la selección de partes: quita lo que quedaría colgando. */
+    fun podarSeleccionOrganica(contratoCanonico: String, marcadas: List<Int>): List<Int> =
+        MotorOrganico.podarSeleccion(contratoCanonico, marcadas)
+
+    /** Cierra hacia arriba: añade lo que necesita lo que se acaba de marcar. */
+    fun completarSeleccionOrganica(contratoCanonico: String, marcadas: List<Int>): List<Int> =
+        MotorOrganico.completarSeleccion(contratoCanonico, marcadas)
+
+    /** El contrato reducido a las partes marcadas, o `null` con el motivo en [ultimoError]. */
+    fun contratoConPartes(contratoCanonico: String, aceptadas: List<Int>): String? {
+        val resultado = MotorOrganico.conPartes(contratoCanonico, aceptadas)
+        return resultado.contratoCanonico
+            ?: rechazarTexto(resultado.motivo ?: "La figura sin esas partes no se puede construir")
+    }
+
+    /**
+     * Añade solo las partes marcadas de una figura, ligado a la revisión que vio la IA.
+     *
+     * Podar antes de aplicar y no después es lo que hace que el documento no vea nunca
+     * una figura a medias: si la selección no compila, no se toca nada y el motivo va a
+     * `ultimoError`, igual que en cualquier otra edición rechazada.
+     */
+    fun anadirParteDeEscultura(
+        contratoCanonico: String,
+        aceptadas: List<Int>,
+        versionEsperada: Long,
+        padreId: String? = null,
+    ): Boolean {
+        if (versionDocumento != versionEsperada) return rechazar(DOCUMENTO_CAMBIADO)
+        val podado = contratoConPartes(contratoCanonico, aceptadas) ?: return false
+        return anadirEscultura(podado, padreId)
+    }
+
+    /** Reemplaza una escultura por las partes marcadas de la propuesta. Ver [anadirParteDeEscultura]. */
+    fun reemplazarParteDeEscultura(
+        id: String,
+        contratoCanonico: String,
+        aceptadas: List<Int>,
+        versionEsperada: Long,
+    ): Boolean {
+        if (versionDocumento != versionEsperada) return rechazar(DOCUMENTO_CAMBIADO)
+        val podado = contratoConPartes(contratoCanonico, aceptadas) ?: return false
+        return reemplazarEscultura(id, podado)
+    }
+
+    /**
      * Cose un plan: le añade las operaciones que unen lo que quedó suelto.
      *
      * El banco dejó el diagnóstico cerrado —el único modo de fallo que queda es el
@@ -4590,6 +4732,12 @@ class Editor(inicial: Documento = Documento.vacio()) {
     private fun rechazar(motivo: String): Boolean {
         ultimoError = motivo
         return false
+    }
+
+    /** [rechazar] para lo que devuelve texto en vez de un booleano. */
+    private fun rechazarTexto(motivo: String): String? {
+        ultimoError = motivo
+        return null
     }
 
     private fun recortarHistorial() {
