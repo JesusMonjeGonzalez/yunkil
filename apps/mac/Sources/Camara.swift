@@ -63,10 +63,20 @@ struct CamaraOrbital {
     }
 
     /// Encuadra una caja completa dejando un pequeño margen.
-    mutating func encuadrar(minimo: SIMD3<Float>, maximo: SIMD3<Float>) {
-        objetivo = (minimo + maximo) * 0.5
-        let radio = max(simd_length((maximo - minimo) * 0.5), 0.5)
-        distancia = radio / tan(campoDeVision * 0.5) * 1.6
+    mutating func encuadrar(minimo: SIMD3<Float>, maximo: SIMD3<Float>, aspecto: Float = 1) {
+        guard aspecto.isFinite, aspecto > 0,
+              campoDeVision.isFinite, campoDeVision > 0, campoDeVision < .pi,
+              (0..<3).allSatisfy({ minimo[$0].isFinite && maximo[$0].isFinite && minimo[$0] <= maximo[$0] }) else { return }
+        let centro = minimo * 0.5 + maximo * 0.5
+        let radio = max(simd_length(maximo * 0.5 - minimo * 0.5), 0.5)
+        // El campo horizontal se estrecha en un visor alto. Una esfera que contiene
+        // la caja cabe desde cualquier órbita si cabe en la apertura menor.
+        let tangente = tan(campoDeVision * 0.5) * min(aspecto, 1)
+        let apertura = ortografica ? tangente : sin(atan(tangente))
+        let nuevaDistancia = max(1, radio * 1.1 / apertura)
+        guard nuevaDistancia.isFinite else { return }
+        objetivo = centro
+        distancia = nuevaDistancia
     }
 
     /// La base de la cámara: hacia dónde mira, su derecha y su arriba.

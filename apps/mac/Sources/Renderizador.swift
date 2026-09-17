@@ -32,6 +32,7 @@ final class Renderizador: NSObject, MTKViewDelegate {
     private var pipeline: MTLRenderPipelineState?
 
     private let editor: Editor
+    private weak var vista: MTKView?
     private var bufferDeUniforms: MTLBuffer?
     private var huellaCompilada: String = ""
     private var alturaPlato: Float = 0
@@ -73,6 +74,7 @@ final class Renderizador: NSObject, MTKViewDelegate {
         self.dispositivo = dispositivo
         self.cola = cola
         self.editor = editor
+        self.vista = vista
 
         let hz = Double(vista.preferredFramesPerSecond > 0 ? vista.preferredFramesPerSecond : 60)
         self.gobernador = GobernadorDeRecursos(objetivoDeFotograma: 1.0 / hz)
@@ -113,9 +115,12 @@ final class Renderizador: NSObject, MTKViewDelegate {
         let mn = editor.cotaMinima.map { $0.floatValue }
         let mx = editor.cotaMaxima.map { $0.floatValue }
         guard mn.count == 3, mx.count == 3 else { return }
+        let tamano = vista?.bounds.size ?? .zero
+        let aspecto = tamano.width > 0 && tamano.height > 0 ? Float(tamano.width / tamano.height) : 1
         camara.encuadrar(
             minimo: SIMD3<Float>(mn[0], mn[1], mn[2]),
-            maximo: SIMD3<Float>(mx[0], mx[1], mx[2])
+            maximo: SIMD3<Float>(mx[0], mx[1], mx[2]),
+            aspecto: aspecto
         )
     }
 
