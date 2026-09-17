@@ -134,4 +134,55 @@ class FlujoOrganicoIATest {
         assertTrue("COMPLETO" in mensaje, "parches y diferencias no valen: el contrato va entero")
         assertTrue(respuesta in mensaje, "la respuesta rechazada vuelve recortada pero vuelve")
     }
+
+    @Test
+    fun `revisar el contrato mide la figura sin tocar el documento del usuario`() {
+        val editor = Editor(Documento.vacio())
+        assertTrue(editor.anadir("CAJA", null), editor.ultimoError)
+        val version = editor.versionDocumento
+        val filas = editor.filas().size
+
+        val revision = editor.revisarContrato(contratoValido())
+        assertTrue(revision.aceptable, "una mascota sana no tiene nada que corregir: ${revision.motivos}")
+        assertEquals(version, editor.versionDocumento, "revisar no gasta un punto de deshacer")
+        assertEquals(filas, editor.filas().size, "la figura del banco no puede aparecer en el árbol")
+    }
+
+    @Test
+    fun `una parte demasiado fina vuelve al modelo como motivo medido`() {
+        val palillo = """
+            {"esquema":"yunkil.organico.v1","nombre":"Palillo","unidades":"mm","fusionMm":1,
+             "partes":[
+              {"id":"cuerpo","rol":"CUERPO","forma":"CAPSULA","a":[0,2,0],"b":[0,40,0],"radio":0.4},
+              {"id":"cabeza","rol":"CABEZA","forma":"ESFERA","centro":[0,41,0],"radio":1.5,"unidoA":"cuerpo"},
+              {"id":"ojo","rol":"OJO","forma":"ESFERA","centro":[0,41.5,-1.2],"radio":0.5,"unidoA":"cabeza"}
+             ]}
+        """.trimIndent()
+        val contrato = assertNotNull(MotorOrganico.interpretar(palillo).contratoCanonico)
+
+        // El validador del contrato lo acepta: el esquema está bien, las partes se
+        // tocan y el gradiente es sano. Es exactamente el fallo que solo aparece
+        // midiendo la geometría compilada.
+        val revision = Editor(Documento.vacio()).revisarContrato(contrato)
+        assertFalse(revision.aceptable, "una figura de 0,8 mm de grueso no se imprime")
+
+        val mensaje = MotorOrganico.revisionParaModelo(revision.motivos, palillo)
+        assertTrue(revision.motivos.first() in mensaje)
+        assertTrue("radio" in mensaje, "al modelo se le dice cómo engordar, no que escale")
+    }
+
+    @Test
+    fun `la figura que no mide lo pedido se corrige antes que la fabricacion`() {
+        val editor = Editor(Documento.vacio())
+        val revision = editor.revisarContrato(contratoValido(), peticion = "una mascota de 200 mm de alto")
+
+        assertFalse(revision.aceptable, "la petición decía una altura y la figura no la tiene")
+        assertEquals(1, revision.motivos.size, "primero el tamaño; lo demás puede desaparecer al corregirlo")
+        val motivo = revision.motivos.first()
+        assertTrue("200" in motivo, "el modelo necesita saber cuánto se pidió: $motivo")
+        assertTrue("mide" in motivo, "y cuánto mide de verdad: $motivo")
+
+        // Sin cota en la petición no hay nada que comprobar y no se inventa un fallo.
+        assertTrue(editor.revisarContrato(contratoValido(), peticion = "una mascota").aceptable)
+    }
 }

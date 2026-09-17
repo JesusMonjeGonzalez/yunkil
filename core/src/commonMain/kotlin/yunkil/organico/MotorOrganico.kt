@@ -251,6 +251,77 @@ object MotorOrganico {
         ${respuestaAnterior.take(2000)}
     """.trimIndent()
 
+    /**
+     * El mensaje de reintento cuando el contrato era válido y la figura no lo es.
+     *
+     * Es deliberadamente distinto de [correccionParaModelo], por la misma razón que
+     * el plan paramétrico separa corrección de revisión: allí el modelo se equivocó
+     * escribiendo y hay que devolverlo al esquema; aquí escribió un contrato
+     * impecable y lo que falla es la figura que sale de compilarlo. Repetirle el
+     * esquema solo consigue que reescriba el JSON y vuelva a dejar el cuello de
+     * medio milímetro. Lo que necesita es la medida.
+     *
+     * Se le recuerda que engordar es cambiar radios y no escalar la figura, porque
+     * escalar es lo primero que hace un modelo cuando se le dice que algo es fino, y
+     * eso arregla la pared estropeando el tamaño que ya estaba bien.
+     */
+    fun revisionParaModelo(motivos: List<String>, respuestaAnterior: String): String = """
+        Tu contrato se entendió y la figura se construyó, pero medida sobre la
+        geometría ya compilada tiene estos problemas:
+
+        ${motivos.joinToString("\n") { "- $it" }}
+
+        Rehaz el contrato corrigiéndolos. Para engordar una parte fina sube su radio,
+        no la escala de la figura entera. Devuelve el contrato COMPLETO, no un parche.
+
+        Contrato anterior:
+        ${respuestaAnterior.take(2000)}
+    """.trimIndent()
+
+    // ------------------------------------------------------- aceptación parcial
+
+    /** El contrato contado parte por parte, listo para enseñarlo con una casilla cada una. */
+    fun explicar(contratoCanonico: String): List<LineaOrganica> =
+        leer(contratoCanonico)?.let { ExplicacionOrganica.de(it) } ?: emptyList()
+
+    /** Cierra hacia abajo la selección de partes: quita lo que quedaría colgando. */
+    fun podarSeleccion(contratoCanonico: String, marcadas: List<Int>): List<Int> =
+        leer(contratoCanonico)
+            ?.let { ExplicacionOrganica.podar(it, marcadas.toSet()).sorted() }
+            ?: emptyList()
+
+    /** Cierra hacia arriba: añade lo que necesita lo que se acaba de marcar. */
+    fun completarSeleccion(contratoCanonico: String, marcadas: List<Int>): List<Int> =
+        leer(contratoCanonico)
+            ?.let { ExplicacionOrganica.completar(it, marcadas.toSet()).sorted() }
+            ?: emptyList()
+
+    /**
+     * El contrato reducido a las partes marcadas, ya canónico, o el motivo del rechazo.
+     *
+     * La selección pasa por [ExplicacionOrganica.podar] **siempre**, aunque la interfaz
+     * ya la haya cerrado: una parte que se une a otra que no va a existir no falla, se
+     * queda flotando, y ese es exactamente el fallo callado que el resto del bucle
+     * existe para no tener.
+     *
+     * Y después se vuelve a validar y a compilar entero. Quitar una parte cambia la
+     * figura de verdad: dos piezas que se tocaban a través de la que se ha quitado
+     * dejan de tocarse, y eso lo tiene que decir el mismo validador que aceptó el
+     * contrato original, no una regla nueva escrita para este camino.
+     */
+    fun conPartes(contratoCanonico: String, marcadas: List<Int>): ResultadoContratoOrganico {
+        val contrato = leer(contratoCanonico) ?: return rechazo("Contrato orgánico inválido")
+        val vivas = ExplicacionOrganica.podar(contrato, marcadas.toSet())
+        if (vivas.size == contrato.partes.size) {
+            return ResultadoContratoOrganico(true, contratoCanonico, contrato.nombre)
+        }
+        if (vivas.isEmpty()) return rechazo("No se aceptó ninguna parte de la figura")
+        val podado = contrato.copy(
+            partes = contrato.partes.filterIndexed { i, _ -> i in vivas },
+        )
+        return canonizar(podado, "La figura sin esas partes no se puede construir")
+    }
+
     fun generarStl(
         contratoCanonico: String,
         ruta: String,
@@ -998,7 +1069,7 @@ object MotorOrganico {
 
     // -------------------------------------------------------------------- validación
 
-    private fun leer(canonico: String): ContratoOrganico? = try {
+    internal fun leer(canonico: String): ContratoOrganico? = try {
         json.decodeFromString<ContratoOrganico>(canonico)
     } catch (_: Exception) {
         null
