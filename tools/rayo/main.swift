@@ -182,6 +182,42 @@ conVistas.mirarDesde(.perfil)
 let perfil = conVistas.rayo(uv: .zero, aspecto: 1).direccion
 comprobar(abs(perfil.y) < 0.02 && abs(perfil.z) < 0.02, "el perfil mira por el eje X: \(perfil)")
 
+// Encuadrar debe mostrar las ocho esquinas también al estrechar el visor con
+// inspectores abiertos, sin alterar la órbita elegida ni la proyección.
+for paralela in [false, true] {
+    for aspecto: Float in [0.2, 0.5, 1, 16.0 / 9.0, 3] {
+        for vista: CamaraOrbital.Vista in [.planta, .alzado, .perfil, .isometrica] {
+            var encuadre = CamaraOrbital()
+            encuadre.ortografica = paralela
+            encuadre.mirarDesde(vista)
+            let azimut = encuadre.azimut
+            let elevacion = encuadre.elevacion
+            let mn = SIMD3<Float>(-80, -5, 20)
+            let mx = SIMD3<Float>(100, 30, 70)
+            encuadre.encuadrar(minimo: mn, maximo: mx, aspecto: aspecto)
+            let esquinas = [mn.x, mx.x].flatMap { x in
+                [mn.y, mx.y].flatMap { y in [mn.z, mx.z].map { SIMD3<Float>(x, y, $0) } }
+            }
+            comprobar(esquinas.allSatisfy { punto in
+                guard let uv = encuadre.proyectar(punto, aspecto: aspecto) else { return false }
+                return abs(uv.x) < 1 && abs(uv.y) < 1
+            }, "encuadre completo · aspecto \(aspecto) · paralela \(paralela) · \(vista)")
+            comprobar(encuadre.azimut == azimut && encuadre.elevacion == elevacion,
+                      "encuadrar conserva la órbita")
+        }
+    }
+}
+var encuadreInvalido = CamaraOrbital()
+let distanciaInicial = encuadreInvalido.distancia
+encuadreInvalido.encuadrar(minimo: .zero, maximo: .one, aspecto: .nan)
+encuadreInvalido.encuadrar(minimo: .one, maximo: .zero)
+encuadreInvalido.encuadrar(minimo: .zero, maximo: SIMD3<Float>(.infinity, 1, 1))
+comprobar(encuadreInvalido.distancia == distanciaInicial && encuadreInvalido.objetivo == .zero,
+          "datos inválidos conservan la cámara")
+encuadreInvalido.encuadrar(minimo: .one, maximo: .one, aspecto: 0.5)
+comprobar(encuadreInvalido.distancia.isFinite && encuadreInvalido.distancia >= 1,
+          "una caja puntual produce un encuadre finito")
+
 if fallos == 0 {
     print("\nRayo de cámara: todo correcto.")
     exit(0)
